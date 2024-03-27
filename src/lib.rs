@@ -1,5 +1,6 @@
 use std::error::Error;
 
+pub use helpers::traits::http_response::ResponseUtil;
 pub use helpers::traits::http_stream::StreamHttp;
 pub use http::{Request, Response};
 use tokio::{
