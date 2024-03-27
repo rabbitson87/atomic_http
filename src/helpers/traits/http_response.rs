@@ -9,6 +9,14 @@ use tokio::{
 
 use crate::Writer;
 
+impl Writer {
+    pub async fn write_bytes(&mut self) -> Result<(), Box<dyn Error>> {
+        let body = self.bytes.as_slice();
+        self.writer.write_all(body).await?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait ResponseUtil {
     async fn responser(&mut self) -> Result<(), Box<dyn Error>>;
@@ -52,6 +60,17 @@ impl ResponseUtil for Response<Writer> {
                 }
                 self.body_mut().writer.write_all(&buffer[0..len]).await?;
             }
+        } else if !self.body().bytes.is_empty() {
+            for (key, value) in self.headers().iter() {
+                send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+            }
+            send_string.push_str("\r\n");
+            self.body_mut()
+                .writer
+                .write_all(&send_string.as_bytes())
+                .await?;
+
+            self.body_mut().write_bytes().await?;
         } else {
             let (body, content_string) = get_body(self.body().body.as_str()).await;
             send_string.push_str(&content_string);

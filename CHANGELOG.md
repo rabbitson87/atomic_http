@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.5
+
+* Add bytes response(don't use body).
+
 ## 0.1.4
 
 * Change server address type(String -> &str).

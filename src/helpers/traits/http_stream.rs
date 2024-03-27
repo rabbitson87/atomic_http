@@ -132,6 +132,7 @@ impl StreamHttp for TcpStream {
                 .body(Writer {
                     writer,
                     body: "".into(),
+                    bytes: vec![],
                 })?,
         ))
     }

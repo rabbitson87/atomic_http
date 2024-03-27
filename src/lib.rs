@@ -32,4 +32,5 @@ pub struct Body {
 pub struct Writer {
     pub writer: WriteHalf<TcpStream>,
     pub body: String,
+    pub bytes: Vec<u8>,
 }
