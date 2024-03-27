@@ -7,7 +7,7 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
 };
 
-use super::http_stream::Writer;
+use crate::Writer;
 
 #[async_trait]
 pub trait ResponseUtil {

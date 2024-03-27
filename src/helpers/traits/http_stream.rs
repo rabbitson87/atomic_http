@@ -1,16 +1,12 @@
 use async_trait::async_trait;
 use http::{header::CONTENT_TYPE, HeaderMap, Request, Response};
 use std::error::Error;
-use tokio::io::{split, AsyncReadExt, WriteHalf};
+use tokio::io::{split, AsyncReadExt};
 use tokio::net::TcpStream;
 
 use crate::helpers::common::get_static_str;
 use crate::helpers::traits::bytes::SplitBytes;
-
-pub struct Body {
-    pub body: Vec<u8>,
-    pub len: usize,
-}
+use crate::{Body, Writer};
 
 pub struct Form {
     pub text: (String, String),
@@ -22,11 +18,6 @@ pub struct Part {
     pub file_name: String,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
-}
-
-pub struct Writer {
-    pub writer: WriteHalf<TcpStream>,
-    pub body: String,
 }
 
 #[async_trait]

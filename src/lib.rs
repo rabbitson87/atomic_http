@@ -1,8 +1,11 @@
 use std::error::Error;
 
-use helpers::traits::http_stream::{Body, StreamHttp, Writer};
-use http::{Request, Response};
-use tokio::net::TcpListener;
+pub use helpers::traits::http_stream::StreamHttp;
+pub use http::{Request, Response};
+use tokio::{
+    io::WriteHalf,
+    net::{TcpListener, TcpStream},
+};
 
 mod helpers;
 pub struct Server {
@@ -18,4 +21,13 @@ impl Server {
         let (stream, _) = self.listener.accept().await?;
         Ok(stream.parse_request().await?)
     }
+}
+
+pub struct Body {
+    pub body: Vec<u8>,
+    pub len: usize,
+}
+pub struct Writer {
+    pub writer: WriteHalf<TcpStream>,
+    pub body: String,
 }

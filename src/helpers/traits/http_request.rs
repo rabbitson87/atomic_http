@@ -9,10 +9,11 @@ use crate::helpers::{
     common::get_static_str,
     traits::{
         bytes::SplitBytes,
-        http_stream::{Body, Form, Part},
+        http_stream::{Form, Part},
         GetHeaderChild,
     },
 };
+use crate::Body;
 
 #[async_trait]
 pub trait RequestUtils {
