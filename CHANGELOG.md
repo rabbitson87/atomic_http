@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.4
+
+* Change server address type(String -> &str).
+
 ## 0.1.3
 
 * Add pub trait for request.

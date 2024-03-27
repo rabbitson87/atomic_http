@@ -15,8 +15,8 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn new(address: String) -> Result<Server, Box<dyn Error>> {
-        let listener = TcpListener::bind(&address).await?;
+    pub async fn new(address: &str) -> Result<Server, Box<dyn Error>> {
+        let listener = TcpListener::bind(address).await?;
         Ok(Server { listener })
     }
     pub async fn accept(&self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
