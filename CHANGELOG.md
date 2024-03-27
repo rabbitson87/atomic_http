@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.3
+
+* Add pub trait for request.
+
 ## 0.1.2
 
 * Add pub trait for response.
