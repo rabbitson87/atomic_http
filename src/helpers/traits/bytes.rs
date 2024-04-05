@@ -17,7 +17,7 @@ impl SplitBytes for &[u8] {
             }
         }
         let last = self[start..].to_vec();
-        if [45, 45, 13, 10] != last.as_slice() {
+        if [45, 45, 13, 10] != last.as_slice() && last.len() > 0 {
             result.push(last);
         }
         result

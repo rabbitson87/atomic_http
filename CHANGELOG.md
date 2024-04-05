@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.6
+
+* Fixed blocking empty byte when split bytes.
+
 ## 0.1.5
 
 * Add bytes response(don't use body).
