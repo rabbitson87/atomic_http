@@ -1,5 +1,13 @@
 # Changes
 
+## 0.1.7
+
+* Update dependencies.
+  tokio: 1.36.0 -> 1.38.0
+  async-trait: 0.1.79 -> 0.1.80
+  serde_json: 1.0.115 -> 1.0.117
+  serde 1.0.197 -> 1.0.203
+
 ## 0.1.6
 
 * Fixed blocking empty byte when split bytes.

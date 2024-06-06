@@ -81,9 +81,7 @@ impl ResponseUtil for Response<Writer> {
             println!("headers: {}", &send_string);
             send_string.push_str("\r\n");
 
-            // println!("current version: v{}", VERSION);
             send_string.push_str(&body);
-            // let path = get_temp_path()?;
 
             self.body_mut()
                 .writer
