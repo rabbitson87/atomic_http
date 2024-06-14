@@ -1,17 +1,16 @@
 use std::error::Error;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use http::HeaderMap;
+use http::HeaderName;
 use http::Request;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-use crate::helpers::{
-    common::get_static_str,
-    traits::{
-        bytes::SplitBytes,
-        http_stream::{Form, Part},
-        GetHeaderChild,
-    },
+use crate::helpers::traits::{
+    bytes::SplitBytes,
+    http_stream::{Form, Part},
+    GetHeaderChild,
 };
 use crate::Body;
 
@@ -80,7 +79,7 @@ impl RequestUtils for Request<Body> {
                         break;
                     }
                 }
-                let line_split = get_static_str(part_string).split("\r\n");
+                let line_split = part_string.split("\r\n");
 
                 let mut part = Part {
                     name: "".into(),
@@ -88,12 +87,14 @@ impl RequestUtils for Request<Body> {
                     headers: HeaderMap::new(),
                     body: Vec::new(),
                 };
-                for line in line_split {
+
+                let mut headers: Vec<(String, String)> = Vec::new();
+                line_split.for_each(|line| {
                     println!("{}", line);
                     if line.is_empty() {
-                        continue;
+                        return;
                     }
-                    if line.contains("Content-Disposition") {
+                    if line.to_lowercase().contains("content-disposition") {
                         let size_split = line.split(": ");
                         let value = size_split.last();
 
@@ -116,12 +117,16 @@ impl RequestUtils for Request<Body> {
                         let key = size_split.next();
                         let value = size_split.next();
 
-                        part.headers.insert(
-                            get_static_str(key.unwrap().to_lowercase()),
-                            http::header::HeaderValue::from_static(value.unwrap()),
-                        );
+                        headers.push((key.unwrap().to_lowercase(), value.unwrap().into()));
                     }
-                }
+                });
+
+                part.headers = HeaderMap::from_iter(headers.into_iter().map(|(key, value)| {
+                    (
+                        HeaderName::from_str(key.as_str()).unwrap(),
+                        value.parse().unwrap(),
+                    )
+                }));
 
                 if !part.file_name.is_empty() {
                     part_bytes.read_to_end(&mut part.body).await?;

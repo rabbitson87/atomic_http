@@ -1,5 +1,9 @@
 # Changes
 
+## 0.2.0
+
+* Add tokio_rustls for parse_request(features="tokio_rustls"), remove static_str.
+
 ## 0.1.7
 
 * Update dependencies.
