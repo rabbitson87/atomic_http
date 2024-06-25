@@ -39,7 +39,7 @@ impl ResponseUtil for Response<Writer> {
             #[cfg(feature = "response_file")]
             {
                 use http::header::CONTENT_TYPE;
-                self.headers().remove(CONTENT_TYPE);
+                self.headers_mut().remove(CONTENT_TYPE);
                 send_string.push_str(&format!(
                     "Content-Type: {}\r\n",
                     get_content_type(&self.body().body)

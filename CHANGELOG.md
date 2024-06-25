@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.3
+
+* Fixed response_file for remove header.
+
 ## 0.3.2
 
 * Fixed response_file for content-type, response status.
