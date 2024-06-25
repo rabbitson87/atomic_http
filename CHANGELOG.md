@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.0
+
+* Add response_file for response.response_file(features="response_file"), remove zip response.
+
 ## 0.2.0
 
 * Add tokio_rustls for parse_request(features="tokio_rustls"), remove static_str.

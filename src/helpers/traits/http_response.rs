@@ -29,9 +29,7 @@ impl ResponseUtil for Response<Writer> {
         let status_line = format!("{:?} {}\r\n", self.version(), self.status());
         send_string.push_str(&status_line);
 
-        let content_type = self.headers().get("content-type");
-
-        if content_type.is_some() && content_type.unwrap().to_str()?.contains("application/zip") {
+        if cfg!(feature = "response_file") && self.body().use_file {
             for (key, value) in self.headers().iter() {
                 send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
             }

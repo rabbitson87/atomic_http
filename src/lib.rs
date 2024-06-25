@@ -48,4 +48,23 @@ pub struct Writer {
     pub writer: WriteHalf<TcpStream>,
     pub body: String,
     pub bytes: Vec<u8>,
+    pub use_file: bool,
+}
+
+#[cfg(feature = "response_file")]
+use std::path::Path;
+
+impl Writer {
+    #[cfg(feature = "response_file")]
+    pub fn response_file<P>(&mut self, path: P) -> Result<(), Box<dyn Error>>
+    where
+        P: AsRef<Path>,
+    {
+        use std::env;
+        let current_dir = env::current_dir()?;
+        let path = current_dir.join(path);
+        self.body = path.to_str().unwrap().to_string();
+        self.use_file = true;
+        Ok(())
+    }
 }

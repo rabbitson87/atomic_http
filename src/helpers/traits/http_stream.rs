@@ -77,6 +77,7 @@ fn get_parse_result_from_request(
                 writer,
                 body: "".into(),
                 bytes: vec![],
+                use_file: false,
             })?,
     ))
 }
