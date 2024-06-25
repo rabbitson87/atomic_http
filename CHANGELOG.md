@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.1
+
+* Fixed response_file for content-type with mime_guess.
+
 ## 0.3.0
 
 * Add response_file for response.response_file(features="response_file"), remove zip response.

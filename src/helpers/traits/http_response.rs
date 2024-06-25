@@ -2,10 +2,7 @@ use std::error::Error;
 
 use async_trait::async_trait;
 use http::Response;
-use tokio::{
-    fs,
-    io::{self, AsyncReadExt, AsyncWriteExt},
-};
+use tokio::io::AsyncWriteExt;
 
 use crate::Writer;
 
@@ -30,6 +27,21 @@ impl ResponseUtil for Response<Writer> {
         send_string.push_str(&status_line);
 
         if cfg!(feature = "response_file") && self.body().use_file {
+            use http::StatusCode;
+            use tokio::{
+                fs,
+                io::{self, AsyncReadExt},
+            };
+            *self.status_mut() = StatusCode::from_u16(200)?;
+
+            #[cfg(feature = "response_file")]
+            {
+                send_string.push_str(&format!(
+                    "Content-Type: {}\r\n",
+                    get_content_type(&self.body().body)
+                ));
+            }
+
             for (key, value) in self.headers().iter() {
                 send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
             }
@@ -88,6 +100,17 @@ impl ResponseUtil for Response<Writer> {
         }
         self.body_mut().writer.flush().await?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "response_file")]
+fn get_content_type(file_name: &str) -> String {
+    let guess = mime_guess::from_path(file_name);
+
+    if let Some(mime) = guess.first() {
+        mime.to_string()
+    } else {
+        "text/plain".to_string()
     }
 }
 
