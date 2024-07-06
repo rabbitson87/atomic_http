@@ -110,6 +110,8 @@ where
 }
 
 fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
+    println!("bytes len: {:?}", &bytes.len());
+
     let (header, body) = bytes.as_slice().split_header_body();
     let headers_string: String = String::from_utf8_lossy(&header).into();
 
