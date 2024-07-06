@@ -186,7 +186,10 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
             }
         });
     }
-    let version = version_option.unwrap();
+    let version = match version_option {
+        Some(version) => version,
+        None => http::Version::HTTP_11,
+    };
 
     let mut request = Request::builder();
     if headers.len() > 0 {
@@ -196,8 +199,14 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
     }
 
     let request = request
-        .method(method_option.unwrap())
-        .uri(uri_option.unwrap())
+        .method(match method_option {
+            Some(method) => method,
+            None => http::Method::GET,
+        })
+        .uri(match uri_option {
+            Some(uri) => uri,
+            None => "/".parse().unwrap(),
+        })
         .version(version)
         .body(Body { body, len })?;
 

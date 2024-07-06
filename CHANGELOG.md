@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.5
+
+* Fixed none header with request when parse header.
+
 ## 0.3.4
 
 * Fixed parse header.
