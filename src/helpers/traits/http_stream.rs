@@ -126,12 +126,12 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
     if !headers_string.is_empty() {
         let line_split = headers_string.split("\r\n");
 
-        line_split.for_each(|line| {
+        line_split.enumerate().for_each(|(index, line)| {
             println!("{}", line);
             if line == "" {
                 return;
             }
-            if line.to_uppercase().contains("HTTP/") {
+            if index == 0 {
                 let mut line_split_sub = line.split(" ");
                 match line_split_sub.next() {
                     Some(method) => {

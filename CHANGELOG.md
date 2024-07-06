@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.4
+
+* Fixed parse header.
+
 ## 0.3.3
 
 * Fixed response_file for remove header.
