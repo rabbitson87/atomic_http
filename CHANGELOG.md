@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.8
+
+* Fixed status for response_file between plain.
+
 ## 0.3.7
 
 * Fixed status for response_file.

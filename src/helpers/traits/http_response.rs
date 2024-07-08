@@ -23,17 +23,19 @@ pub trait ResponseUtil {
 impl ResponseUtil for Response<Writer> {
     async fn responser(&mut self) -> Result<(), Box<dyn Error>> {
         let mut send_string = String::new();
+        if cfg!(feature = "response_file") && self.body().use_file {
+            use http::StatusCode;
+            *self.status_mut() = StatusCode::from_u16(200)?;
+        }
         let status_line = format!("{:?} {}\r\n", self.version(), self.status());
         send_string.push_str(&status_line);
 
         if cfg!(feature = "response_file") && self.body().use_file {
-            use http::StatusCode;
             use tokio::{
                 fs,
                 io::{self, AsyncReadExt},
             };
 
-            *self.status_mut() = StatusCode::from_u16(200)?;
             #[cfg(feature = "response_file")]
             {
                 use http::header::CONTENT_TYPE;
