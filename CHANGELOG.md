@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.7
+
+* Fixed status for response_file.
+
 ## 0.3.6
 
 * Add print request bytes len when parse header.
