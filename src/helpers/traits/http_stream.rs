@@ -28,6 +28,7 @@ pub trait StreamHttp {
 #[async_trait]
 impl StreamHttp for TcpStream {
     async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
+        self.readable().await?;
         let (mut reader, writer) = split(self);
 
         let bytes: Vec<u8> = get_bytes_from_reader(&mut reader).await;
@@ -45,6 +46,7 @@ use tokio_rustls::server::TlsStream;
 #[async_trait]
 impl StreamHttp for TlsStream<TcpStream> {
     async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
+        self.readable().await?;
         let (mut reader, writer) = split(self);
 
         let bytes: Vec<u8> = get_bytes_from_reader(&mut reader).await;
@@ -88,7 +90,7 @@ where
 {
     let mut bytes: Vec<u8> = vec![];
 
-    let buffer_size = 1024;
+    let buffer_size = 4096;
     let mut buf = vec![0; buffer_size];
     loop {
         match reader.read(&mut buf).await {

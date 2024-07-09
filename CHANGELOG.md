@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.9
+
+* Fixed buffer size(1024 -> 4096) and wait for readable stream.
+
 ## 0.3.8
 
 * Fixed status for response_file between plain.
