@@ -46,7 +46,6 @@ use tokio_rustls::server::TlsStream;
 #[async_trait]
 impl StreamHttp for TlsStream<TcpStream> {
     async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
-        self.readable().await?;
         let (mut reader, writer) = split(self);
 
         let bytes: Vec<u8> = get_bytes_from_reader(&mut reader).await;
@@ -115,7 +114,7 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
     println!("bytes len: {:?}", &bytes.len());
 
     let (header, body) = bytes.as_slice().split_header_body();
-    let headers_string: String = String::from_utf8_lossy(&header).into();
+    let headers_string: String = String::from_utf8(header)?.into();
 
     println!("headers_string: {:?}", &headers_string);
     println!("headers_string len: {:?}", &headers_string.len());
