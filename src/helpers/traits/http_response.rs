@@ -40,10 +40,21 @@ impl ResponseUtil for Response<Writer> {
             {
                 use http::header::CONTENT_TYPE;
                 self.headers_mut().remove(CONTENT_TYPE);
-                send_string.push_str(&format!(
-                    "Content-Type: {}\r\n",
-                    get_content_type(&self.body().body)
-                ));
+                match self.body().body.split('.').last().unwrap() {
+                    "zip" => {
+                        send_string.push_str("Content-Type: application/zip\r\n");
+                        send_string.push_str(&format!(
+                            "content-disposition: attachment; filename={}\r\n",
+                            self.body().body
+                        ));
+                    }
+                    _ => {
+                        send_string.push_str(&format!(
+                            "Content-Type: {}\r\n",
+                            get_content_type(&self.body().body)
+                        ));
+                    }
+                }
             }
 
             for (key, value) in self.headers().iter() {

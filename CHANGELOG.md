@@ -1,5 +1,13 @@
 # Changes
 
+## 0.3.11
+
+* Add for zip response for response_file feature.
+
+## 0.3.10
+
+* Fixed for only parse the header format when utf-8.
+
 ## 0.3.9
 
 * Fixed buffer size(1024 -> 4096) and wait for readable stream.
