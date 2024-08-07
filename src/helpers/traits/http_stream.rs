@@ -103,6 +103,7 @@ where
             }
             Err(err) => {
                 println!("an error occurred; error = {:?}", err);
+                break;
             }
         }
     }

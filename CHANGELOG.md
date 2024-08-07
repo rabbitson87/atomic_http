@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.12
+
+* Fixed for read request when read error.
+
 ## 0.3.11
 
 * Add for zip response for response_file feature.
