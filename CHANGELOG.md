@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.13
+
+* Add set nodelay for tcpstream.
+
 ## 0.3.12
 
 * Fixed for read request when read error.

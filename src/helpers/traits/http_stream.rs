@@ -28,7 +28,8 @@ pub trait StreamHttp {
 #[async_trait]
 impl StreamHttp for TcpStream {
     async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
-        self.readable().await?;
+        self.set_nodelay(true)?;
+
         let (mut reader, writer) = split(self);
 
         let bytes: Vec<u8> = get_bytes_from_reader(&mut reader).await;
