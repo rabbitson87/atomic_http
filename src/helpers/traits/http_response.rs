@@ -2,14 +2,28 @@ use std::error::Error;
 
 use async_trait::async_trait;
 use http::Response;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{self, AsyncWriteExt};
 
 use crate::Writer;
 
 impl Writer {
     pub async fn write_bytes(&mut self) -> Result<(), Box<dyn Error>> {
         let body = self.bytes.as_slice();
-        self.writer.write_all(body).await?;
+        loop {
+            self.stream.writable().await?;
+            match self.stream.try_write(body) {
+                Ok(_n) => {
+                    break;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    self.stream.flush().await?;
+                    return Err(e.into());
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -62,39 +76,59 @@ impl ResponseUtil for Response<Writer> {
             }
 
             let file = fs::File::open(&self.body().body).await?;
-
-            send_string.push_str(
-                format!(
-                    "content-length: {}\r\n",
-                    file.metadata().await.unwrap().len()
-                )
-                .as_str(),
-            );
+            let content_length = file.metadata().await.unwrap().len();
+            send_string.push_str(format!("content-length: {}\r\n", content_length).as_str());
 
             send_string.push_str("\r\n");
-            self.body_mut()
-                .writer
-                .write_all(send_string.as_bytes())
-                .await?;
+            loop {
+                self.body_mut().stream.writable().await?;
+                match self.body_mut().stream.try_write(send_string.as_bytes()) {
+                    Ok(_n) => {
+                        break;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        self.body_mut().stream.flush().await?;
+                        return Err(e.into());
+                    }
+                }
+            }
 
             let mut reader = io::BufReader::new(file);
-            let mut buffer = vec![0; 1048576 * 5];
+            let mut buffer = match content_length < 1048576 * 5 {
+                true => vec![0; content_length as usize],
+                false => vec![0; 1048576 * 5],
+            };
             while let Ok(len) = reader.read(&mut buffer).await {
                 if len == 0 {
                     break;
                 }
-                self.body_mut().writer.write_all(&buffer[0..len]).await?;
+                loop {
+                    self.body_mut().stream.writable().await?;
+                    match self.body_mut().stream.try_write(&buffer[0..len]) {
+                        Ok(_n) => {
+                            break;
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            continue;
+                        }
+                        Err(e) => {
+                            self.body_mut().stream.flush().await?;
+                            return Err(e.into());
+                        }
+                    }
+                }
             }
         } else if !self.body().bytes.is_empty() {
             for (key, value) in self.headers().iter() {
                 send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
             }
             send_string.push_str("\r\n");
-            self.body_mut()
-                .writer
-                .write_all(&send_string.as_bytes())
-                .await?;
-
+            let mut send_string = send_string.as_bytes().to_vec();
+            send_string.extend(self.body().bytes.clone());
+            self.body_mut().bytes = send_string;
             self.body_mut().write_bytes().await?;
         } else {
             let (body, content_string) = get_body(self.body().body.as_str()).await;
@@ -103,17 +137,28 @@ impl ResponseUtil for Response<Writer> {
             for (key, value) in self.headers().iter() {
                 send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
             }
-            println!("headers: {}", &send_string);
+            dev_print!("headers: {}", &send_string);
             send_string.push_str("\r\n");
 
             send_string.push_str(&body);
 
-            self.body_mut()
-                .writer
-                .write_all(&send_string.as_bytes())
-                .await?;
+            loop {
+                self.body_mut().stream.writable().await?;
+                match self.body_mut().stream.try_write(&send_string.as_bytes()) {
+                    Ok(_n) => {
+                        break;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        self.body_mut().stream.flush().await?;
+                        return Err(e.into());
+                    }
+                }
+            }
         }
-        self.body_mut().writer.flush().await?;
+        self.body_mut().stream.flush().await?;
         Ok(())
     }
 }
@@ -133,6 +178,6 @@ async fn get_body(body: &str) -> (String, String) {
     let length = body.len();
 
     let content_length = format!("content-length: {}\r\n", length);
-    println!("content-length: {}\n", &content_length);
+    dev_print!("content-length: {}\n", &content_length);
     (body.into(), content_length)
 }

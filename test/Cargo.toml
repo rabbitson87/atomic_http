@@ -1,0 +1,15 @@
+[package]
+name = "test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.39.2", features = [
+    "rt-multi-thread",
+    "sync",
+    "macros",
+    "fs",
+] }
+http = "1.1.0"
+atomic_http = { path = "../", features = ["response_file"] }
+urlencoding = "2.1.3"

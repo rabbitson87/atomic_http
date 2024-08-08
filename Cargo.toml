@@ -1,6 +1,6 @@
 [package]
 name = "atomic_http"
-version = "0.3.13"
+version = "0.4.0"
 authors = ["hsng95@gmail.com"]
 description = "High level HTTP server library"
 homepage = "https://github.com/rabbitson87/atomic_http"
@@ -10,6 +10,8 @@ license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.77"
 
+[workspace]
+members = ["test"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -27,6 +29,7 @@ tokio-rustls = { version = "0.26.0", default-features = false, optional = true }
 mime_guess = { version = "2.0.5", optional = true }
 
 [features]
-default = []
+default = ["debug"]
 tokio_rustls = ["dep:tokio-rustls"]
 response_file = ["dep:mime_guess"]
+debug = []

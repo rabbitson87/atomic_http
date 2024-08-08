@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
 use std::error::Error;
-use tokio::io::{split, AsyncReadExt, WriteHalf};
+use std::thread::sleep;
+use tokio::io::{self, AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 
 use crate::helpers::traits::bytes::SplitBytes;
@@ -30,13 +31,11 @@ impl StreamHttp for TcpStream {
     async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
         self.set_nodelay(true)?;
 
-        let (mut reader, writer) = split(self);
-
-        let bytes: Vec<u8> = get_bytes_from_reader(&mut reader).await;
+        let (bytes, stream) = get_bytes_from_reader(self).await?;
 
         let request = get_request(bytes)?;
 
-        Ok(get_parse_result_from_request(request, writer)?)
+        Ok(get_parse_result_from_request(request, stream)?)
     }
 }
 
@@ -47,25 +46,22 @@ use tokio_rustls::server::TlsStream;
 #[async_trait]
 impl StreamHttp for TlsStream<TcpStream> {
     async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
-        let (mut reader, writer) = split(self);
+        let (stream, _connect) = self.into_inner();
+        stream.set_nodelay(true)?;
 
-        let bytes: Vec<u8> = get_bytes_from_reader(&mut reader).await;
+        let (bytes, stream) = get_bytes_from_reader(stream).await?;
 
         let request = get_request(bytes)?;
 
-        Ok(get_parse_result_from_request(request, writer)?)
+        Ok(get_parse_result_from_request(request, stream)?)
     }
 }
 
-#[cfg(not(feature = "tokio_rustls"))]
-type WriterType = WriteHalf<TcpStream>;
-
-#[cfg(feature = "tokio_rustls")]
-type WriterType = WriteHalf<TlsStream<TcpStream>>;
+type WriterType = TcpStream;
 
 fn get_parse_result_from_request(
     request: Request<Body>,
-    writer: WriterType,
+    stream: WriterType,
 ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
     let version = request.version();
 
@@ -76,7 +72,7 @@ fn get_parse_result_from_request(
             .header(CONTENT_TYPE, "application/json")
             .status(400)
             .body(Writer {
-                writer,
+                stream,
                 body: "".into(),
                 bytes: vec![],
                 use_file: false,
@@ -84,42 +80,69 @@ fn get_parse_result_from_request(
     ))
 }
 
-async fn get_bytes_from_reader<T>(reader: &mut T) -> Vec<u8>
-where
-    T: AsyncReadExt + Unpin,
-{
+async fn get_bytes_from_reader(
+    mut stream: TcpStream,
+) -> Result<(Vec<u8>, TcpStream), Box<dyn Error>> {
     let mut bytes: Vec<u8> = vec![];
+    stream.set_linger(None)?;
 
-    let buffer_size = 4096;
-    let mut buf = vec![0; buffer_size];
+    let mut count = 0;
     loop {
-        match reader.read(&mut buf).await {
-            Ok(n) => {
-                if n != 0 {
-                    bytes.extend_from_slice(&buf[..n]);
+        let buffer_size = 4096;
+        let mut buf = vec![0; buffer_size];
+
+        let ready = stream
+            .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
+            .await?;
+        if ready.is_error() || ready.is_read_closed() || ready.is_empty() {
+            stream.flush().await?;
+            return Err("error".into());
+        }
+        if ready.is_readable() {
+            match stream.try_read(&mut buf) {
+                Ok(n) => {
+                    if n != 0 {
+                        bytes.extend_from_slice(&buf[..n]);
+                    }
+                    if n < buffer_size {
+                        bytes.extend_from_slice(&buf[..n]);
+                        break;
+                    }
                 }
-                if n < buffer_size {
-                    break;
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
                 }
-            }
-            Err(err) => {
-                println!("an error occurred; error = {:?}", err);
-                break;
+                Err(e) => {
+                    stream.flush().await?;
+                    return Err(e.into());
+                }
             }
         }
+        if ready.is_writable() {
+            sleep(std::time::Duration::from_millis(1));
+            if count > 0 {
+                stream.flush().await?;
+                return Err("timeout".into());
+            }
+            count += 1;
+        }
+    }
+    if bytes.len() == 0 {
+        stream.flush().await?;
+        return Err("no data".into());
     }
 
-    bytes
+    Ok((bytes, stream))
 }
 
 fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
-    println!("bytes len: {:?}", &bytes.len());
+    dev_print!("bytes len: {:?}", &bytes.len());
 
     let (header, body) = bytes.as_slice().split_header_body();
     let headers_string: String = String::from_utf8(header)?.into();
 
-    println!("headers_string: {:?}", &headers_string);
-    println!("headers_string len: {:?}", &headers_string.len());
+    dev_print!("headers_string: {:?}", &headers_string);
+    dev_print!("headers_string len: {:?}", &headers_string.len());
 
     let len: usize = body.len();
 
@@ -132,7 +155,7 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
         let line_split = headers_string.split("\r\n");
 
         line_split.enumerate().for_each(|(index, line)| {
-            println!("{}", line);
+            dev_print!("{}", line);
             if line == "" {
                 return;
             }
@@ -145,7 +168,7 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
                         }
                     }
                     None => {
-                        println!("method is None");
+                        dev_print!("method is None");
                     }
                 }
                 match line_split_sub.next() {
@@ -155,7 +178,7 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
                         }
                     }
                     None => {
-                        println!("uri is None");
+                        dev_print!("uri is None");
                     }
                 }
                 match line_split_sub.next() {
@@ -172,7 +195,7 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
                     }
                     None => {
                         version_option = Some(http::Version::HTTP_11);
-                        println!("version is None");
+                        dev_print!("version is None");
                     }
                 }
             } else {
@@ -185,7 +208,7 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
                         headers.push((key.unwrap().to_lowercase().into(), value.unwrap().into()));
                     }
                     false => {
-                        println!("key or value is None");
+                        dev_print!("key or value is None");
                     }
                 }
             }

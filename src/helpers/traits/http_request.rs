@@ -71,7 +71,7 @@ impl RequestUtils for Request<Body> {
                 .as_slice()
                 .split_bytes(format!("--{}", &boundary).as_bytes())
             {
-                println!("part_data: {:?}", &part_data.len());
+                dev_print!("part_data: {:?}", &part_data.len());
                 let mut part_string = String::new();
                 let mut part_bytes = BufReader::new(part_data.as_slice());
                 while let Ok(n) = part_bytes.read_line(&mut part_string).await {
@@ -90,7 +90,7 @@ impl RequestUtils for Request<Body> {
 
                 let mut headers: Vec<(String, String)> = Vec::new();
                 line_split.for_each(|line| {
-                    println!("{}", line);
+                    dev_print!("{}", line);
                     if line.is_empty() {
                         return;
                     }

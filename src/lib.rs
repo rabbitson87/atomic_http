@@ -5,10 +5,19 @@ pub use helpers::traits::http_response::ResponseUtil;
 pub use helpers::traits::http_stream::StreamHttp;
 pub use http::{Request, Response};
 
+#[macro_export]
+macro_rules! dev_print {
+    ($($rest:tt)*) => {
+        if (cfg!(feature = "debug")) {
+            std::println!($($rest)*)
+        }
+    };
+}
+
 #[cfg(not(feature = "tokio_rustls"))]
 use tokio::net::TcpListener;
 
-use tokio::{io::WriteHalf, net::TcpStream};
+use tokio::net::TcpStream;
 #[cfg(feature = "tokio_rustls")]
 use tokio_rustls::server::TlsStream;
 
@@ -42,10 +51,7 @@ pub struct Body {
     pub len: usize,
 }
 pub struct Writer {
-    #[cfg(feature = "tokio_rustls")]
-    pub writer: WriteHalf<TlsStream<TcpStream>>,
-    #[cfg(not(feature = "tokio_rustls"))]
-    pub writer: WriteHalf<TcpStream>,
+    pub stream: TcpStream,
     pub body: String,
     pub bytes: Vec<u8>,
     pub use_file: bool,
