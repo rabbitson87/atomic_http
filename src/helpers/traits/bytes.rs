@@ -24,22 +24,13 @@ impl SplitBytes for &[u8] {
     }
     fn split_header_body(&self) -> (Vec<u8>, Vec<u8>) {
         let mut header = Vec::new();
-        let mut body = Vec::new();
-        let mut is_header = true;
-        let mut count = 0;
         for (i, _) in self.iter().enumerate() {
             if self[i..].starts_with(b"\r\n\r\n") {
-                is_header = false;
+                break;
             }
-            if is_header {
-                header.push(self[i]);
-            } else {
-                if count > 3 {
-                    body.push(self[i]);
-                }
-                count += 1;
-            }
+            header.push(self[i]);
         }
+        let body = self[header.len() + 4..].to_vec();
         (header, body)
     }
 }

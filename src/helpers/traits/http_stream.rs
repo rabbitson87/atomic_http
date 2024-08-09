@@ -105,7 +105,6 @@ async fn get_bytes_from_reader(
                         bytes.extend_from_slice(&buf[..n]);
                     }
                     if n < buffer_size {
-                        bytes.extend_from_slice(&buf[..n]);
                         break;
                     }
                 }

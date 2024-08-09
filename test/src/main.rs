@@ -50,6 +50,11 @@ async fn www_service(
             let path = dir.join("app/index.html");
             response.body_mut().response_file(path)?;
         }
+    } else {
+        println!(
+            "request: {:?}\n",
+            String::from_utf8_lossy(request.body().body.as_slice())
+        );
     }
 
     response.responser().await?;

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.1
+
+* Fixed for duplicated read request data.
+
 ## 0.4.0
 
 * Fixed for accept request read, add debug feature(if you need log print!).
