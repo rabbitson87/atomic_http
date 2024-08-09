@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.2
+
+* Fixed for split with header and body. 
+
 ## 0.4.1
 
 * Fixed for duplicated read request data.
