@@ -1,6 +1,6 @@
 [package]
 name = "atomic_http"
-version = "0.4.4"
+version = "0.4.5"
 authors = ["hsng95@gmail.com"]
 description = "High level HTTP server library"
 homepage = "https://github.com/rabbitson87/atomic_http"
@@ -20,6 +20,7 @@ tokio = { version = "1.39.2", default-features = false, features = [
     "macros",
     "io-util",
     "fs",
+    "time",
 ] }
 async-trait = "0.1.81"
 http = "1.1.0"

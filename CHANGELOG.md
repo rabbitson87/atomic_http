@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.5
+
+* Change for improve request read performance in multithread.
+
 ## 0.4.4
 
 * Fixed for accept try limit 1 to 200.

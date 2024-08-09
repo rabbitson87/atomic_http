@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
 use std::error::Error;
-use std::thread::sleep;
+use std::time::Duration;
 use tokio::io::{self, AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 
@@ -86,44 +86,49 @@ async fn get_bytes_from_reader(
     let mut bytes: Vec<u8> = vec![];
     stream.set_linger(None)?;
 
-    let mut count = 0;
     loop {
         let buffer_size = 4096;
         let mut buf = vec![0; buffer_size];
 
-        let ready = stream
-            .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
-            .await?;
-        if ready.is_error() || ready.is_read_closed() || ready.is_empty() {
-            stream.flush().await?;
-            return Err("error".into());
-        }
-        if ready.is_readable() {
-            match stream.try_read(&mut buf) {
-                Ok(n) => {
-                    if n != 0 {
-                        bytes.extend_from_slice(&buf[..n]);
-                    }
-                    if n < buffer_size {
-                        break;
-                    }
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    stream.flush().await?;
-                    return Err(e.into());
-                }
-            }
-        }
-        if ready.is_writable() {
-            sleep(std::time::Duration::from_millis(1));
-            if count > 200 {
+        let mut _count = 0;
+        loop {
+            let ready = stream
+                .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
+                .await?;
+            if ready.is_error() || ready.is_read_closed() || ready.is_empty() {
                 stream.flush().await?;
-                return Err("timeout".into());
+                return Err("error".into());
             }
-            count += 1;
+            if ready.is_readable() {
+                break;
+            }
+            if ready.is_writable() {
+                tokio::time::sleep(Duration::from_nanos(1)).await;
+                if _count > 20 {
+                    stream.flush().await?;
+                    return Err("timeout".into());
+                }
+                _count += 1;
+                continue;
+            }
+        }
+        dev_print!("writable count: {}", _count);
+        match stream.try_read(&mut buf) {
+            Ok(n) => {
+                if n != 0 {
+                    bytes.extend_from_slice(&buf[..n]);
+                }
+                if n < buffer_size {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(e) => {
+                stream.flush().await?;
+                return Err(e.into());
+            }
         }
     }
     if bytes.len() == 0 {

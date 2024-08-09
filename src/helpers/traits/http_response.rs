@@ -8,22 +8,7 @@ use crate::Writer;
 
 impl Writer {
     pub async fn write_bytes(&mut self) -> Result<(), Box<dyn Error>> {
-        let body = self.bytes.as_slice();
-        loop {
-            self.stream.writable().await?;
-            match self.stream.try_write(body) {
-                Ok(_n) => {
-                    break;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    self.stream.flush().await?;
-                    return Err(e.into());
-                }
-            }
-        }
+        send_bytes(&mut self.stream, self.bytes.as_slice()).await?;
         Ok(())
     }
 }
@@ -80,21 +65,7 @@ impl ResponseUtil for Response<Writer> {
             send_string.push_str(format!("content-length: {}\r\n", content_length).as_str());
 
             send_string.push_str("\r\n");
-            loop {
-                self.body_mut().stream.writable().await?;
-                match self.body_mut().stream.try_write(send_string.as_bytes()) {
-                    Ok(_n) => {
-                        break;
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        continue;
-                    }
-                    Err(e) => {
-                        self.body_mut().stream.flush().await?;
-                        return Err(e.into());
-                    }
-                }
-            }
+            send_bytes(&mut self.body_mut().stream, send_string.as_bytes()).await?;
 
             let mut reader = io::BufReader::new(file);
             let mut buffer = match content_length < 1048576 * 5 {
@@ -105,21 +76,7 @@ impl ResponseUtil for Response<Writer> {
                 if len == 0 {
                     break;
                 }
-                loop {
-                    self.body_mut().stream.writable().await?;
-                    match self.body_mut().stream.try_write(&buffer[0..len]) {
-                        Ok(_n) => {
-                            break;
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            continue;
-                        }
-                        Err(e) => {
-                            self.body_mut().stream.flush().await?;
-                            return Err(e.into());
-                        }
-                    }
-                }
+                self.body_mut().stream.write_all(&buffer[0..len]).await?;
             }
         } else if !self.body().bytes.is_empty() {
             for (key, value) in self.headers().iter() {
@@ -141,26 +98,33 @@ impl ResponseUtil for Response<Writer> {
             send_string.push_str("\r\n");
 
             send_string.push_str(&body);
-
-            loop {
-                self.body_mut().stream.writable().await?;
-                match self.body_mut().stream.try_write(&send_string.as_bytes()) {
-                    Ok(_n) => {
-                        break;
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        continue;
-                    }
-                    Err(e) => {
-                        self.body_mut().stream.flush().await?;
-                        return Err(e.into());
-                    }
-                }
-            }
+            send_bytes(&mut self.body_mut().stream, send_string.as_bytes()).await?;
         }
         self.body_mut().stream.flush().await?;
         Ok(())
     }
+}
+
+pub async fn send_bytes(
+    stream: &mut tokio::net::TcpStream,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    loop {
+        stream.writable().await?;
+        match stream.try_write(bytes) {
+            Ok(_n) => {
+                break;
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(e) => {
+                stream.flush().await?;
+                return Err(e.into());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "response_file")]
