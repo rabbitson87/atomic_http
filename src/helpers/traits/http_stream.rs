@@ -119,7 +119,7 @@ async fn get_bytes_from_reader(
         }
         if ready.is_writable() {
             sleep(std::time::Duration::from_millis(1));
-            if count > 0 {
+            if count > 200 {
                 stream.flush().await?;
                 return Err("timeout".into());
             }

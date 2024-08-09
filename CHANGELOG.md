@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.4
+
+* Fixed for accept try limit 1 to 200.
+
 ## 0.4.3
 
 * Fixed for convert string from header with utf8_lossy. 
