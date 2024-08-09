@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.3
+
+* Fixed for convert string from header with utf8_lossy. 
+
 ## 0.4.2
 
 * Fixed for split with header and body. 

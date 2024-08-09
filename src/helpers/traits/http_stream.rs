@@ -138,7 +138,7 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
     dev_print!("bytes len: {:?}", &bytes.len());
 
     let (header, body) = bytes.as_slice().split_header_body();
-    let headers_string: String = String::from_utf8(header)?.into();
+    let headers_string: String = String::from_utf8_lossy(&header).into();
 
     dev_print!("headers_string: {:?}", &headers_string);
     dev_print!("headers_string len: {:?}", &headers_string.len());
