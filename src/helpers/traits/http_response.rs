@@ -1,8 +1,8 @@
-use std::error::Error;
+use std::{error::Error, time::Duration};
 
 use async_trait::async_trait;
 use http::Response;
-use tokio::io::{self, AsyncWriteExt};
+use tokio::io::{self, AsyncWriteExt, Interest};
 
 use crate::Writer;
 
@@ -76,7 +76,7 @@ impl ResponseUtil for Response<Writer> {
                 if len == 0 {
                     break;
                 }
-                self.body_mut().stream.write_all(&buffer[0..len]).await?;
+                send_bytes(&mut self.body_mut().stream, &buffer[0..len]).await?;
             }
         } else if !self.body().bytes.is_empty() {
             for (key, value) in self.headers().iter() {
@@ -109,6 +109,29 @@ pub async fn send_bytes(
     stream: &mut tokio::net::TcpStream,
     bytes: &[u8],
 ) -> Result<(), Box<dyn Error>> {
+    let mut _count = 0;
+
+    loop {
+        let ready = stream
+            .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
+            .await?;
+        if ready.is_error() || ready.is_write_closed() || ready.is_empty() {
+            stream.flush().await?;
+            return Err("error".into());
+        }
+        if ready.is_writable() {
+            break;
+        }
+        if ready.is_readable() {
+            tokio::time::sleep(Duration::from_nanos(1)).await;
+            if _count > 20 {
+                stream.flush().await?;
+                return Err("timeout".into());
+            }
+            _count += 1;
+            continue;
+        }
+    }
     loop {
         stream.writable().await?;
         match stream.try_write(bytes) {

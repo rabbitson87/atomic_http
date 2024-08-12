@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.6
+
+* Fixed for improve response performance in multithread.
+
 ## 0.4.5
 
 * Change for improve request read performance in multithread.
