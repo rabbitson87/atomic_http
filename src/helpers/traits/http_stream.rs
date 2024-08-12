@@ -3,11 +3,11 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
 use std::error::Error;
 use std::time::Duration;
-use tokio::io::{self, AsyncWriteExt, Interest};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 
 use crate::helpers::traits::bytes::SplitBytes;
-use crate::{Body, Writer};
+use crate::{Body, Options, Writer};
 
 pub struct Form {
     pub text: (String, String),
@@ -22,38 +22,25 @@ pub struct Part {
 }
 #[async_trait]
 pub trait StreamHttp {
-    async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>>;
+    async fn parse_request(
+        self,
+        options: &Options,
+    ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>>;
 }
 
-#[cfg(not(feature = "tokio_rustls"))]
 #[async_trait]
 impl StreamHttp for TcpStream {
-    async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
-        self.set_nodelay(true)?;
+    async fn parse_request(
+        self,
+        options: &Options,
+    ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
+        self.set_nodelay(options.no_delay)?;
 
-        let (bytes, stream) = get_bytes_from_reader(self).await?;
-
-        let request = get_request(bytes)?;
-
-        Ok(get_parse_result_from_request(request, stream)?)
-    }
-}
-
-#[cfg(feature = "tokio_rustls")]
-use tokio_rustls::server::TlsStream;
-
-#[cfg(feature = "tokio_rustls")]
-#[async_trait]
-impl StreamHttp for TlsStream<TcpStream> {
-    async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
-        let (stream, _connect) = self.into_inner();
-        stream.set_nodelay(true)?;
-
-        let (bytes, stream) = get_bytes_from_reader(stream).await?;
+        let (bytes, stream) = get_bytes_from_reader(self, options).await?;
 
         let request = get_request(bytes)?;
 
-        Ok(get_parse_result_from_request(request, stream)?)
+        Ok(get_parse_result_from_request(request, stream, options)?)
     }
 }
 
@@ -62,6 +49,7 @@ type WriterType = TcpStream;
 fn get_parse_result_from_request(
     request: Request<Body>,
     stream: WriterType,
+    options: &Options,
 ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
     let version = request.version();
 
@@ -76,58 +64,79 @@ fn get_parse_result_from_request(
                 body: "".into(),
                 bytes: vec![],
                 use_file: false,
+                options: options.clone(),
             })?,
     ))
 }
 
 async fn get_bytes_from_reader(
     mut stream: TcpStream,
+    options: &Options,
 ) -> Result<(Vec<u8>, TcpStream), Box<dyn Error>> {
     let mut bytes: Vec<u8> = vec![];
-    stream.set_linger(None)?;
 
     loop {
         let buffer_size = 4096;
         let mut buf = vec![0; buffer_size];
 
         let mut _count = 0;
-        loop {
-            let ready = stream
-                .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
-                .await?;
-            if ready.is_error() || ready.is_read_closed() || ready.is_empty() {
-                stream.flush().await?;
-                return Err("error".into());
-            }
-            if ready.is_readable() {
-                break;
-            }
-            if ready.is_writable() {
-                tokio::time::sleep(Duration::from_nanos(1)).await;
-                if _count > 20 {
-                    stream.flush().await?;
-                    return Err("timeout".into());
+        match options.use_normal_read {
+            true => match stream.read(&mut buf).await {
+                Ok(n) => {
+                    if n != 0 {
+                        bytes.extend_from_slice(&buf[..n]);
+                    }
+                    if n < buffer_size {
+                        break;
+                    }
                 }
-                _count += 1;
-                continue;
-            }
-        }
-        dev_print!("writable count: {}", _count);
-        match stream.try_read(&mut buf) {
-            Ok(n) => {
-                if n != 0 {
-                    bytes.extend_from_slice(&buf[..n]);
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
                 }
-                if n < buffer_size {
-                    break;
+                Err(e) => {
+                    return Err(e.into());
                 }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(e) => {
-                stream.flush().await?;
-                return Err(e.into());
+            },
+            false => {
+                loop {
+                    let ready = stream
+                        .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
+                        .await?;
+                    if ready.is_error() || ready.is_read_closed() || ready.is_empty() {
+                        stream.flush().await?;
+                        return Err("error".into());
+                    }
+                    if ready.is_readable() {
+                        break;
+                    }
+                    if ready.is_writable() {
+                        tokio::time::sleep(Duration::from_nanos(1)).await;
+                        if _count > options.try_read_limit {
+                            stream.flush().await?;
+                            return Err("timeout".into());
+                        }
+                        _count += 1;
+                        continue;
+                    }
+                }
+                dev_print!("writable count: {}", _count);
+                match stream.try_read(&mut buf) {
+                    Ok(n) => {
+                        if n != 0 {
+                            bytes.extend_from_slice(&buf[..n]);
+                        }
+                        if n < buffer_size {
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        stream.flush().await?;
+                        return Err(e.into());
+                    }
+                }
             }
         }
     }

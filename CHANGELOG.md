@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.7
+
+* Add options for controll request and response.
+
 ## 0.4.6
 
 * Fixed for improve response performance in multithread.

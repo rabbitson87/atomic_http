@@ -4,11 +4,26 @@ use async_trait::async_trait;
 use http::Response;
 use tokio::io::{self, AsyncWriteExt, Interest};
 
-use crate::Writer;
+use crate::{Options, Writer};
+#[cfg(feature = "response_file")]
+use std::path::Path;
 
 impl Writer {
     pub async fn write_bytes(&mut self) -> Result<(), Box<dyn Error>> {
-        send_bytes(&mut self.stream, self.bytes.as_slice()).await?;
+        send_bytes(&mut self.stream, self.bytes.as_slice(), &self.options).await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "response_file")]
+    pub fn response_file<P>(&mut self, path: P) -> Result<(), Box<dyn Error>>
+    where
+        P: AsRef<Path>,
+    {
+        use std::env;
+        let current_dir = env::current_dir()?;
+        let path = current_dir.join(path);
+        self.body = path.to_str().unwrap().to_string();
+        self.use_file = true;
         Ok(())
     }
 }
@@ -28,6 +43,7 @@ impl ResponseUtil for Response<Writer> {
         }
         let status_line = format!("{:?} {}\r\n", self.version(), self.status());
         send_string.push_str(&status_line);
+        let options = self.body().options.clone();
 
         if cfg!(feature = "response_file") && self.body().use_file {
             use tokio::{
@@ -65,7 +81,12 @@ impl ResponseUtil for Response<Writer> {
             send_string.push_str(format!("content-length: {}\r\n", content_length).as_str());
 
             send_string.push_str("\r\n");
-            send_bytes(&mut self.body_mut().stream, send_string.as_bytes()).await?;
+            send_bytes(
+                &mut self.body_mut().stream,
+                send_string.as_bytes(),
+                &options,
+            )
+            .await?;
 
             let mut reader = io::BufReader::new(file);
             let mut buffer = match content_length < 1048576 * 5 {
@@ -76,7 +97,7 @@ impl ResponseUtil for Response<Writer> {
                 if len == 0 {
                     break;
                 }
-                send_bytes(&mut self.body_mut().stream, &buffer[0..len]).await?;
+                send_bytes(&mut self.body_mut().stream, &buffer[0..len], &options).await?;
             }
         } else if !self.body().bytes.is_empty() {
             for (key, value) in self.headers().iter() {
@@ -98,7 +119,12 @@ impl ResponseUtil for Response<Writer> {
             send_string.push_str("\r\n");
 
             send_string.push_str(&body);
-            send_bytes(&mut self.body_mut().stream, send_string.as_bytes()).await?;
+            send_bytes(
+                &mut self.body_mut().stream,
+                send_string.as_bytes(),
+                &options,
+            )
+            .await?;
         }
         self.body_mut().stream.flush().await?;
         Ok(())
@@ -108,42 +134,50 @@ impl ResponseUtil for Response<Writer> {
 pub async fn send_bytes(
     stream: &mut tokio::net::TcpStream,
     bytes: &[u8],
+    options: &Options,
 ) -> Result<(), Box<dyn Error>> {
-    let mut _count = 0;
+    match options.use_send_write_all {
+        true => {
+            stream.write_all(bytes).await?;
+        }
+        false => {
+            let mut _count = 0;
 
-    loop {
-        let ready = stream
-            .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
-            .await?;
-        if ready.is_error() || ready.is_write_closed() || ready.is_empty() {
-            stream.flush().await?;
-            return Err("error".into());
-        }
-        if ready.is_writable() {
-            break;
-        }
-        if ready.is_readable() {
-            tokio::time::sleep(Duration::from_nanos(1)).await;
-            if _count > 20 {
-                stream.flush().await?;
-                return Err("timeout".into());
+            loop {
+                let ready = stream
+                    .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
+                    .await?;
+                if ready.is_error() || ready.is_write_closed() || ready.is_empty() {
+                    stream.flush().await?;
+                    return Err("error".into());
+                }
+                if ready.is_writable() {
+                    break;
+                }
+                if ready.is_readable() {
+                    tokio::time::sleep(Duration::from_nanos(1)).await;
+                    if _count > options.try_write_limit {
+                        stream.flush().await?;
+                        return Err("timeout".into());
+                    }
+                    _count += 1;
+                    continue;
+                }
             }
-            _count += 1;
-            continue;
-        }
-    }
-    loop {
-        stream.writable().await?;
-        match stream.try_write(bytes) {
-            Ok(_n) => {
-                break;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(e) => {
-                stream.flush().await?;
-                return Err(e.into());
+            loop {
+                stream.writable().await?;
+                match stream.try_write(bytes) {
+                    Ok(_n) => {
+                        break;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        stream.flush().await?;
+                        return Err(e.into());
+                    }
+                }
             }
         }
     }

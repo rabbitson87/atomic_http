@@ -7,8 +7,10 @@ use tokio::fs::try_exists;
 #[tokio::main]
 async fn main() {
     let address: String = format!("0.0.0.0:{}", 9000);
-    let server = Server::new(&address).await.unwrap();
+    let mut server = Server::new(&address).await.unwrap();
 
+    server.options.use_send_write_all = true;
+    server.options.use_normal_read = true;
     println!("start server on: {}", address);
     loop {
         if let Ok((request, response)) = server.accept().await {
