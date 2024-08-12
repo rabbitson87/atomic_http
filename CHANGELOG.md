@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.8
+
+* Add options for response file root path.
+
 ## 0.4.7
 
 * Add options for controll request and response.

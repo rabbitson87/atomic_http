@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{env::current_dir, error::Error, path::PathBuf};
 
 pub use helpers::traits::http_request::RequestUtils;
 pub use helpers::traits::http_response::ResponseUtil;
@@ -37,6 +37,7 @@ pub struct Options {
     pub try_write_limit: i32,
     pub use_normal_read: bool,
     pub use_send_write_all: bool,
+    pub root_path: PathBuf,
 }
 
 impl Options {
@@ -47,6 +48,7 @@ impl Options {
             try_write_limit: 20,
             use_normal_read: false,
             use_send_write_all: false,
+            root_path: current_dir().unwrap(),
         }
     }
 }

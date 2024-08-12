@@ -19,9 +19,8 @@ impl Writer {
     where
         P: AsRef<Path>,
     {
-        use std::env;
-        let current_dir = env::current_dir()?;
-        let path = current_dir.join(path);
+        let root_path = &self.options.root_path;
+        let path = root_path.join(path);
         self.body = path.to_str().unwrap().to_string();
         self.use_file = true;
         Ok(())
