@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.9
+
+* Change for request to get_json simply.
+
 ## 0.4.8
 
 * Add options for response file root path.

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use http::HeaderMap;
 use http::HeaderName;
 use http::Request;
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 use crate::helpers::traits::{
@@ -14,36 +15,39 @@ use crate::helpers::traits::{
 };
 use crate::Body;
 
+use super::StringUtil;
+
 #[async_trait]
 pub trait RequestUtils {
-    async fn get_json(&mut self) -> Result<serde_json::Value, Box<dyn Error>>;
+    async fn get_json<'a, T>(&'a mut self) -> Result<T, Box<dyn Error>>
+    where
+        T: Deserialize<'a>;
     async fn get_text(&mut self) -> Result<String, Box<dyn Error>>;
     async fn get_multi_part(&mut self) -> Result<Option<Form>, Box<dyn Error>>;
 }
 
 #[async_trait]
 impl RequestUtils for Request<Body> {
-    async fn get_json(&mut self) -> Result<serde_json::Value, Box<dyn Error>> {
-        let mut body = String::new();
-
+    async fn get_json<'a, T>(&'a mut self) -> Result<T, Box<dyn Error>>
+    where
+        T: Deserialize<'a>,
+    {
         if self.body().len > 0 {
-            body = String::from_utf8_lossy(self.body().body.as_slice()).into();
+            self.body_mut().body = String::from_utf8_lossy(self.body().bytes.as_slice()).into();
         }
 
-        let body: serde_json::Value = match body.as_str() {
-            "" => serde_json::json!({}),
-            _ => serde_json::from_str(body.as_str()).unwrap(),
+        let body: T = match self.body().body.as_str() {
+            "" => return Err("Empty body".into()),
+            body => serde_json::from_str(body).unwrap(),
         };
         Ok(body)
     }
     async fn get_text(&mut self) -> Result<String, Box<dyn Error>> {
-        let mut body = String::new();
-
         if self.body().len > 0 {
-            body = String::from_utf8_lossy(self.body().body.as_slice()).into();
+            self.body_mut().body = String::from_utf8_lossy(self.body().bytes.as_slice()).into();
         }
 
-        Ok(body)
+        Ok(self.body().body.copy_string())
     }
     async fn get_multi_part(&mut self) -> Result<Option<Form>, Box<dyn Error>> {
         let content_type = self.headers().get("content-type");
@@ -67,7 +71,7 @@ impl RequestUtils for Request<Body> {
 
             for part_data in self
                 .body()
-                .body
+                .bytes
                 .as_slice()
                 .split_bytes(format!("--{}", &boundary).as_bytes())
             {

@@ -86,9 +86,11 @@ impl Server {
 }
 
 pub struct Body {
-    pub body: Vec<u8>,
+    pub bytes: Vec<u8>,
+    pub body: String,
     pub len: usize,
 }
+
 pub struct Writer {
     pub stream: TcpStream,
     pub body: String,

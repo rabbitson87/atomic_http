@@ -61,7 +61,7 @@ fn get_parse_result_from_request(
             .status(400)
             .body(Writer {
                 stream,
-                body: "".into(),
+                body: String::new(),
                 bytes: vec![],
                 use_file: false,
                 options: options.clone(),
@@ -151,13 +151,13 @@ async fn get_bytes_from_reader(
 fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
     dev_print!("bytes len: {:?}", &bytes.len());
 
-    let (header, body) = bytes.as_slice().split_header_body();
+    let (header, bytes) = bytes.as_slice().split_header_body();
     let headers_string: String = String::from_utf8_lossy(&header).into();
 
     dev_print!("headers_string: {:?}", &headers_string);
     dev_print!("headers_string len: {:?}", &headers_string.len());
 
-    let len: usize = body.len();
+    let len: usize = bytes.len();
 
     let mut method_option = None;
     let mut uri_option = None;
@@ -249,7 +249,11 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
             None => "/".parse().unwrap(),
         })
         .version(version)
-        .body(Body { body, len })?;
+        .body(Body {
+            body: String::new(),
+            bytes,
+            len,
+        })?;
 
     Ok(request)
 }

@@ -10,7 +10,7 @@ async fn main() {
     let mut server = Server::new(&address).await.unwrap();
 
     server.options.use_send_write_all = true;
-    server.options.use_normal_read = true;
+    server.options.try_read_limit = 40;
     println!("start server on: {}", address);
     loop {
         if let Ok((request, response)) = server.accept().await {
@@ -55,7 +55,7 @@ async fn www_service(
     } else {
         println!(
             "request: {:?}\n",
-            String::from_utf8_lossy(request.body().body.as_slice())
+            String::from_utf8_lossy(request.body().bytes.as_slice())
         );
     }
 
