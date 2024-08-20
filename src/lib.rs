@@ -1,4 +1,4 @@
-use std::{env::current_dir, error::Error, path::PathBuf};
+use std::{env::current_dir, error::Error, path::PathBuf, str::FromStr};
 
 pub use helpers::traits::http_request::RequestUtils;
 pub use helpers::traits::http_response::ResponseUtil;
@@ -42,14 +42,58 @@ pub struct Options {
 
 impl Options {
     pub fn new() -> Options {
-        Options {
+        let mut _options = Options {
             no_delay: true,
             try_read_limit: 20,
             try_write_limit: 20,
             use_normal_read: false,
             use_send_write_all: false,
             root_path: current_dir().unwrap(),
+        };
+
+        #[cfg(feature = "env")]
+        {
+            use std::env;
+            if let Ok(data) = env::var("NO_DELAY") {
+                // true, false
+                if let Ok(data) = data.parse::<bool>() {
+                    _options.no_delay = data;
+                }
+            }
+            if let Ok(data) = env::var("TRY_READ_LIMIT") {
+                if let Ok(data) = data.parse::<i32>() {
+                    _options.try_read_limit = data;
+                }
+            }
+
+            if let Ok(data) = env::var("TRY_WRITE_LIMIT") {
+                if let Ok(data) = data.parse::<i32>() {
+                    _options.try_write_limit = data;
+                }
+            }
+
+            if let Ok(data) = env::var("USE_NORMAL_READ") {
+                // true, false
+                if let Ok(data) = data.parse::<bool>() {
+                    _options.use_normal_read = data;
+                }
+            }
+
+            if let Ok(data) = env::var("USE_SEND_WRITE_ALL") {
+                // true, false
+                if let Ok(data) = data.parse::<bool>() {
+                    _options.use_send_write_all = data;
+                }
+            }
+
+            if let Ok(data) = env::var("ROOT_PATH") {
+                if let Ok(data) = PathBuf::from_str(&data) {
+                    _options.root_path = data;
+                }
+            }
         }
+
+        _options
     }
 }
 

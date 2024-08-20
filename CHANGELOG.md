@@ -1,5 +1,19 @@
 # Changes
 
+## 0.4.10
+
+* Add for server to auto inject from .env file simply.
+
+.env file example
+```
+NO_DELAY=true
+TRY_READ_LIMIT=20
+TRY_WRITE_LIMIT=20
+USE_NORMAL_READ=false
+USE_SEND_WRITE_ALL=false
+ROOT_PATH=D:\\git\\atomic_http\\test
+```
+
 ## 0.4.9
 
 * Change for request to get_json simply.
