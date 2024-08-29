@@ -1,5 +1,21 @@
 # Changes
 
+## 0.4.11
+
+* Add re export external list.
+
+```
+pub mod external {
+    pub use async_trait;
+    #[cfg(feature = "env")]
+    pub use dotenv;
+    pub use http;
+    #[cfg(feature = "response_file")]
+    pub use mime_guess;
+    pub use tokio;
+}
+```
+
 ## 0.4.10
 
 * Add for server to auto inject from .env file simply.

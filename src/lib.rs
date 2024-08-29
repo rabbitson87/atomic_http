@@ -1,9 +1,23 @@
-use std::{env::current_dir, error::Error, path::PathBuf, str::FromStr};
+use std::{env::current_dir, error::Error, path::PathBuf};
+
+#[cfg(feature = "env")]
+use std::str::FromStr;
 
 pub use helpers::traits::http_request::RequestUtils;
 pub use helpers::traits::http_response::ResponseUtil;
 pub use helpers::traits::http_stream::StreamHttp;
-pub use http::{Request, Response};
+
+pub mod external {
+    pub use async_trait;
+    #[cfg(feature = "env")]
+    pub use dotenv;
+    pub use http;
+    #[cfg(feature = "response_file")]
+    pub use mime_guess;
+    pub use tokio;
+}
+
+use http::{Request, Response};
 
 #[macro_export]
 macro_rules! dev_print {
