@@ -1,5 +1,13 @@
 # Changes
 
+## 0.4.13
+
+* Change method for request parse when content-length showing.
+
+## 0.4.12
+
+* Fixed for request parse when content-length showing.
+
 ## 0.4.11
 
 * Add re export external list.

@@ -38,7 +38,7 @@ impl StreamHttp for TcpStream {
 
         let (bytes, stream) = get_bytes_from_reader(self, options).await?;
 
-        let (request, stream) = get_request(bytes, stream, options).await?;
+        let request = get_request(bytes).await?;
 
         Ok(get_parse_result_from_request(request, stream, options)?)
     }
@@ -72,20 +72,38 @@ async fn get_bytes_from_reader(
     options: &Options,
 ) -> Result<(Vec<u8>, TcpStream), Box<dyn Error>> {
     let mut bytes: Vec<u8> = vec![];
+    let buffer_size = 4096;
+    let mut buf = vec![0; buffer_size];
 
+    let mut headers_done = false;
+    let mut content_length = None;
     loop {
-        let buffer_size = 4096;
-        let mut buf = vec![0; buffer_size];
-
         let mut _count = 0;
         match options.use_normal_read {
             true => match stream.read(&mut buf).await {
                 Ok(n) => {
-                    if n != 0 {
-                        bytes.extend_from_slice(&buf[..n]);
-                    }
-                    if n < buffer_size {
+                    if n == 0 {
                         break;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+
+                    if !headers_done {
+                        if let Some(headers_end) = find_headers_end(&bytes) {
+                            headers_done = true;
+                            content_length = parse_content_length(&bytes[..headers_end]);
+
+                            if let Some(length) = content_length {
+                                if bytes.len() >= headers_end + length {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    } else if let Some(length) = content_length {
+                        if bytes.len() >= length {
+                            break;
+                        }
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -120,11 +138,28 @@ async fn get_bytes_from_reader(
                 dev_print!("writable count: {}", _count);
                 match stream.try_read(&mut buf) {
                     Ok(n) => {
-                        if n != 0 {
-                            bytes.extend_from_slice(&buf[..n]);
-                        }
-                        if n < buffer_size {
+                        if n == 0 {
                             break;
+                        }
+                        bytes.extend_from_slice(&buf[..n]);
+
+                        if !headers_done {
+                            if let Some(headers_end) = find_headers_end(&bytes) {
+                                headers_done = true;
+                                content_length = parse_content_length(&bytes[..headers_end]);
+
+                                if let Some(length) = content_length {
+                                    if bytes.len() >= headers_end + length {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        } else if let Some(length) = content_length {
+                            if bytes.len() >= length {
+                                break;
+                            }
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -146,14 +181,10 @@ async fn get_bytes_from_reader(
     Ok((bytes, stream))
 }
 
-async fn get_request(
-    bytes: Vec<u8>,
-    mut stream: TcpStream,
-    options: &Options,
-) -> Result<(Request<Body>, TcpStream), Box<dyn Error>> {
+async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
     dev_print!("bytes len: {:?}", &bytes.len());
 
-    let (header, mut bytes) = bytes.as_slice().split_header_body();
+    let (header, bytes) = bytes.as_slice().split_header_body();
     let headers_string: String = String::from_utf8_lossy(&header).into();
 
     dev_print!("headers_string: {:?}", &headers_string);
@@ -235,24 +266,10 @@ async fn get_request(
     };
 
     let mut request = Request::builder();
-    let mut need_body = false;
     if headers.len() > 0 {
         for (key, value) in headers {
-            if key == "content-length" {
-                if let Ok(value) = value.parse::<usize>() {
-                    if value > len {
-                        need_body = true;
-                    }
-                }
-            }
             request = request.header(key, value);
         }
-    }
-
-    if need_body {
-        let (inner_bytes, inner_stream) = get_bytes_from_reader(stream, options).await?;
-        stream = inner_stream;
-        bytes.extend_from_slice(&inner_bytes);
     }
 
     let request = request
@@ -271,5 +288,23 @@ async fn get_request(
             len,
         })?;
 
-    Ok((request, stream))
+    Ok(request)
+}
+
+fn find_headers_end(data: &[u8]) -> Option<usize> {
+    data.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|pos| pos + 4)
+}
+
+fn parse_content_length(headers: &[u8]) -> Option<usize> {
+    let headers_str = String::from_utf8_lossy(headers);
+    headers_str
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("content-length:"))
+        .and_then(|line| {
+            line.split(':')
+                .nth(1)
+                .and_then(|len| len.trim().parse().ok())
+        })
 }
