@@ -38,17 +38,15 @@ impl StreamHttp for TcpStream {
 
         let (bytes, stream) = get_bytes_from_reader(self, options).await?;
 
-        let request = get_request(bytes)?;
+        let (request, stream) = get_request(bytes, stream, options).await?;
 
         Ok(get_parse_result_from_request(request, stream, options)?)
     }
 }
 
-type WriterType = TcpStream;
-
 fn get_parse_result_from_request(
     request: Request<Body>,
-    stream: WriterType,
+    stream: TcpStream,
     options: &Options,
 ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
     let version = request.version();
@@ -148,10 +146,14 @@ async fn get_bytes_from_reader(
     Ok((bytes, stream))
 }
 
-fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
+async fn get_request(
+    bytes: Vec<u8>,
+    mut stream: TcpStream,
+    options: &Options,
+) -> Result<(Request<Body>, TcpStream), Box<dyn Error>> {
     dev_print!("bytes len: {:?}", &bytes.len());
 
-    let (header, bytes) = bytes.as_slice().split_header_body();
+    let (header, mut bytes) = bytes.as_slice().split_header_body();
     let headers_string: String = String::from_utf8_lossy(&header).into();
 
     dev_print!("headers_string: {:?}", &headers_string);
@@ -233,10 +235,24 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
     };
 
     let mut request = Request::builder();
+    let mut need_body = false;
     if headers.len() > 0 {
         for (key, value) in headers {
+            if key == "content-length" {
+                if let Ok(value) = value.parse::<usize>() {
+                    if value > len {
+                        need_body = true;
+                    }
+                }
+            }
             request = request.header(key, value);
         }
+    }
+
+    if need_body {
+        let (inner_bytes, inner_stream) = get_bytes_from_reader(stream, options).await?;
+        stream = inner_stream;
+        bytes.extend_from_slice(&inner_bytes);
     }
 
     let request = request
@@ -255,5 +271,5 @@ fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
             len,
         })?;
 
-    Ok(request)
+    Ok((request, stream))
 }

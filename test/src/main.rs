@@ -1,11 +1,12 @@
 use std::error::Error;
 
-use atomic_http::{Body, ResponseUtil, Server, Writer};
+use atomic_http::{external::dotenv::dotenv, Body, ResponseUtil, Server, Writer};
 use http::{Request, Response};
 use tokio::fs::try_exists;
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
     let address: String = format!("0.0.0.0:{}", 9000);
     let server = Server::new(&address).await.unwrap();
 
@@ -29,6 +30,10 @@ async fn www_service(
     mut response: Response<Writer>,
 ) -> Result<(), Box<dyn Error>> {
     if request.headers().get("host") != None && request.uri().path() != "/" {
+        println!(
+            "request: {:?}\n",
+            String::from_utf8_lossy(request.body().bytes.as_slice())
+        );
         let path = request.uri().path()[1..].to_owned();
 
         if path.contains(".") {
