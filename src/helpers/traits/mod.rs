@@ -15,6 +15,9 @@ impl GetHeaderChild for &str {
         self.split("; ").for_each(|item| {
             if item != "form-data" {
                 let mut items = item.split("=\"");
+                if items.clone().count() != 2 {
+                    return;
+                }
                 let key = items.next().unwrap();
                 let value = items.next().unwrap().replace("\"", "");
                 result.insert(key.into(), value);

@@ -76,7 +76,7 @@ impl ResponseUtil for Response<Writer> {
             }
 
             let file = fs::File::open(&self.body().body).await?;
-            let content_length = file.metadata().await.unwrap().len();
+            let content_length = file.metadata().await?.len();
             send_string.push_str(format!("content-length: {}\r\n", content_length).as_str());
 
             send_string.push_str("\r\n");

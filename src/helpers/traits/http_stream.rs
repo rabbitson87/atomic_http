@@ -279,7 +279,7 @@ async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
         })
         .uri(match uri_option {
             Some(uri) => uri,
-            None => "/".parse().unwrap(),
+            None => "/".parse()?,
         })
         .version(version)
         .body(Body {

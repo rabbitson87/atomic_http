@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.14
+
+* Fixed for unwrap function.
+
 ## 0.4.13
 
 * Change method for request parse when content-length showing.

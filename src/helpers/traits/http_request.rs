@@ -38,7 +38,7 @@ impl RequestUtils for Request<Body> {
 
         let body: T = match self.body().body.as_str() {
             "" => return Err("Empty body".into()),
-            body => serde_json::from_str(body).unwrap(),
+            body => serde_json::from_str(body)?,
         };
         Ok(body)
     }
@@ -118,6 +118,9 @@ impl RequestUtils for Request<Body> {
                         form.text.1 = line.into();
                     } else {
                         let mut size_split = line.split(": ");
+                        if size_split.clone().count() != 2 {
+                            return;
+                        }
                         let key = size_split.next();
                         let value = size_split.next();
 
