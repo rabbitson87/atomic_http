@@ -77,8 +77,9 @@ async fn get_bytes_from_reader(
 
     let mut headers_done = false;
     let mut content_length = None;
+    let mut max_count = 0;
+    let mut min_count = 0;
     loop {
-        let mut _count = 0;
         match options.use_normal_read {
             true => match stream.read(&mut buf).await {
                 Ok(n) => {
@@ -114,6 +115,7 @@ async fn get_bytes_from_reader(
                 }
             },
             false => {
+                let mut _count = 0;
                 loop {
                     let ready = stream
                         .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
@@ -135,7 +137,12 @@ async fn get_bytes_from_reader(
                         continue;
                     }
                 }
-                dev_print!("writable count: {}", _count);
+                if min_count == 0 && max_count == 0 || min_count > _count {
+                    min_count = _count;
+                }
+                if max_count < _count {
+                    max_count = _count;
+                }
                 match stream.try_read(&mut buf) {
                     Ok(n) => {
                         if n == 0 {
@@ -176,6 +183,9 @@ async fn get_bytes_from_reader(
     if bytes.len() == 0 {
         stream.flush().await?;
         return Err("no data".into());
+    }
+    if max_count != 0 && min_count != 0 {
+        dev_print!("min_count: {:?}, max_count: {:?}", min_count, max_count);
     }
 
     Ok((bytes, stream))

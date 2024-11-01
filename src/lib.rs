@@ -58,10 +58,10 @@ impl Options {
     pub fn new() -> Options {
         let mut _options = Options {
             no_delay: true,
-            try_read_limit: 20,
-            try_write_limit: 20,
+            try_read_limit: 80,
+            try_write_limit: 80,
             use_normal_read: false,
-            use_send_write_all: false,
+            use_send_write_all: true,
             root_path: current_dir().unwrap(),
         };
 
@@ -101,9 +101,7 @@ impl Options {
             }
 
             if let Ok(data) = env::var("ROOT_PATH") {
-                if let Ok(data) = PathBuf::from_str(&data) {
-                    _options.root_path = data;
-                }
+                _options.root_path = PathBuf::from_str(&data).unwrap();
             }
         }
 

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.15
+
+* Change for debug_print with (min, max) read count, default options.
+
 ## 0.4.14
 
 * Fixed for unwrap function.
