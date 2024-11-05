@@ -1,4 +1,4 @@
-use std::{env::current_dir, error::Error, path::PathBuf};
+use std::{env::current_dir, error::Error, io, path::PathBuf};
 
 #[cfg(feature = "env")]
 use std::str::FromStr;
@@ -134,7 +134,20 @@ impl Server {
     }
     #[cfg(not(feature = "tokio_rustls"))]
     pub async fn accept(&self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
-        let (stream, _) = self.listener.accept().await?;
+        use std::time::Duration;
+
+        let (stream, _) = match self.listener.accept().await {
+            Ok(data) => data,
+            Err(e) => {
+                if is_connection_error(&e) {
+                    return Err(e.into());
+                }
+                dev_print!("Accept Error: {:?}", e);
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                return Err(e.into());
+            }
+        };
         Ok(stream.parse_request(&self.options).await?)
     }
     #[cfg(feature = "tokio_rustls")]
@@ -160,4 +173,13 @@ pub struct Writer {
     pub bytes: Vec<u8>,
     pub use_file: bool,
     pub options: Options,
+}
+
+fn is_connection_error(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
 }

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.17
+
+* Add delay for connecting tcpstream with unkown error.
+
 ## 0.4.16
 
 * Add option for normal_read_timeout_miliseconds.
