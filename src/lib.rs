@@ -50,6 +50,7 @@ pub struct Options {
     pub try_read_limit: i32,
     pub try_write_limit: i32,
     pub use_normal_read: bool,
+    pub read_timeout_miliseconds: u64,
     pub use_send_write_all: bool,
     pub root_path: PathBuf,
 }
@@ -61,6 +62,7 @@ impl Options {
             try_read_limit: 80,
             try_write_limit: 80,
             use_normal_read: false,
+            read_timeout_miliseconds: 3000,
             use_send_write_all: true,
             root_path: current_dir().unwrap(),
         };
@@ -77,6 +79,11 @@ impl Options {
             if let Ok(data) = env::var("TRY_READ_LIMIT") {
                 if let Ok(data) = data.parse::<i32>() {
                     _options.try_read_limit = data;
+                }
+            }
+            if let Ok(data) = env::var("READ_TIMEOUT_MILISECONDS") {
+                if let Ok(data) = data.parse::<u64>() {
+                    _options.read_timeout_miliseconds = data;
                 }
             }
 

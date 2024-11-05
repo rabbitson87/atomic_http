@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.16
+
+* Add option for normal_read_timeout_miliseconds.
+
 ## 0.4.15
 
 * Change for debug_print with (min, max) read count, default options.

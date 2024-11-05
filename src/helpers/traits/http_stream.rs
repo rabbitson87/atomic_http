@@ -81,37 +81,48 @@ async fn get_bytes_from_reader(
     let mut min_count = 0;
     loop {
         match options.use_normal_read {
-            true => match stream.read(&mut buf).await {
-                Ok(n) => {
-                    if n == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&buf[..n]);
+            true => match tokio::time::timeout(
+                Duration::from_millis(options.read_timeout_miliseconds),
+                stream.read(&mut buf),
+            )
+            .await
+            {
+                Ok(read_result) => match read_result {
+                    Ok(n) => {
+                        if n == 0 {
+                            break;
+                        }
+                        bytes.extend_from_slice(&buf[..n]);
 
-                    if !headers_done {
-                        if let Some(headers_end) = find_headers_end(&bytes) {
-                            headers_done = true;
-                            content_length = parse_content_length(&bytes[..headers_end]);
+                        if !headers_done {
+                            if let Some(headers_end) = find_headers_end(&bytes) {
+                                headers_done = true;
+                                content_length = parse_content_length(&bytes[..headers_end]);
 
-                            if let Some(length) = content_length {
-                                if bytes.len() >= headers_end + length {
+                                if let Some(length) = content_length {
+                                    if bytes.len() >= headers_end + length {
+                                        break;
+                                    }
+                                } else {
                                     break;
                                 }
-                            } else {
+                            }
+                        } else if let Some(length) = content_length {
+                            if bytes.len() >= length {
                                 break;
                             }
                         }
-                    } else if let Some(length) = content_length {
-                        if bytes.len() >= length {
-                            break;
-                        }
                     }
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e.into());
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e.into());
+                    }
+                },
+                Err(_) => {
+                    stream.flush().await?;
+                    return Err("timeout".into());
                 }
             },
             false => {
