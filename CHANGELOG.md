@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.21
+
+* Add option for read stream when binary imcompleted.
+
 ## 0.4.20
 
 * Recovery for read_stream when use_normal_read is false.

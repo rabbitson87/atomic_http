@@ -224,10 +224,20 @@ async fn get_bytes_from_reader(
             if bytes.len() < expected {
                 stream.flush().await?;
                 return Err(format!(
-                    "Incomplete data after {} retries: got {}/{} bytes",
+                    "Incomplete data after {} retries: got {}/{} bytes{}",
                     max_retry,
                     bytes.len(),
-                    expected
+                    expected,
+                    match options.use_imcomplete_error_log {
+                        true => format!(
+                            ", Data:{}",
+                            match find_headers_end(&bytes) {
+                                Some(headers_end) => String::from_utf8_lossy(&bytes[headers_end..]),
+                                None => String::from_utf8_lossy(&bytes),
+                            }
+                        ),
+                        false => "".into(),
+                    }
                 )
                 .into());
             }

@@ -55,6 +55,7 @@ pub struct Options {
     pub root_path: PathBuf,
     pub read_buffer_size: usize,
     pub read_max_retry: u8,
+    pub use_imcomplete_error_log: bool,
 }
 
 impl Options {
@@ -69,6 +70,7 @@ impl Options {
             root_path: current_dir().unwrap(),
             read_buffer_size: 4096,
             read_max_retry: 3,
+            use_imcomplete_error_log: false,
         };
 
         #[cfg(feature = "env")]
@@ -124,6 +126,13 @@ impl Options {
             if let Ok(data) = env::var("READ_MAX_RETRY") {
                 if let Ok(data) = data.parse::<u8>() {
                     _options.read_max_retry = data;
+                }
+            }
+
+            if let Ok(data) = env::var("USE_IMCOMPLETE_ERROR_LOG") {
+                // true, false
+                if let Ok(data) = data.parse::<bool>() {
+                    _options.use_imcomplete_error_log = data;
                 }
             }
         }

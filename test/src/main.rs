@@ -8,20 +8,22 @@ use tokio::fs::try_exists;
 async fn main() {
     dotenv().ok();
     let address: String = format!("0.0.0.0:{}", 9000);
-    let server = Server::new(&address).await.unwrap();
+    let mut server = Server::new(&address).await.unwrap();
+    server.options.read_buffer_size = 1024 * 4;
 
     println!("start server on: {}", address);
     loop {
-        if let Ok((request, response)) = server.accept().await {
-            tokio::spawn(async move {
+        match server.accept().await {
+            Ok((request, response)) => tokio::spawn(async move {
                 www_service(request, response).await.unwrap_or_else(|e| {
                     println!("an error occured; error = {:?}", e);
                 });
-            });
-        } else {
-            println!("failed to accept connection");
-            continue;
-        }
+            }),
+            Err(e) => {
+                println!("failed to accept connection: {e:?}");
+                continue;
+            }
+        };
     }
 }
 
