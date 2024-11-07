@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.19
+
+* Add option for tcpStream read_retry.
+
 ## 0.4.18
 
 * Add option for tcpStream buffer size.

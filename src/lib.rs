@@ -47,13 +47,14 @@ pub struct Server {
 #[derive(Debug, Clone)]
 pub struct Options {
     pub no_delay: bool,
-    pub try_read_limit: i32,
-    pub try_write_limit: i32,
+    pub try_read_limit: u16,
+    pub try_write_limit: u16,
     pub use_normal_read: bool,
     pub read_timeout_miliseconds: u64,
     pub use_send_write_all: bool,
     pub root_path: PathBuf,
     pub read_buffer_size: usize,
+    pub read_max_retry: u8,
 }
 
 impl Options {
@@ -67,6 +68,7 @@ impl Options {
             use_send_write_all: true,
             root_path: current_dir().unwrap(),
             read_buffer_size: 4096,
+            read_max_retry: 3,
         };
 
         #[cfg(feature = "env")]
@@ -79,7 +81,7 @@ impl Options {
                 }
             }
             if let Ok(data) = env::var("TRY_READ_LIMIT") {
-                if let Ok(data) = data.parse::<i32>() {
+                if let Ok(data) = data.parse::<u16>() {
                     _options.try_read_limit = data;
                 }
             }
@@ -90,7 +92,7 @@ impl Options {
             }
 
             if let Ok(data) = env::var("TRY_WRITE_LIMIT") {
-                if let Ok(data) = data.parse::<i32>() {
+                if let Ok(data) = data.parse::<u16>() {
                     _options.try_write_limit = data;
                 }
             }
@@ -116,6 +118,12 @@ impl Options {
             if let Ok(data) = env::var("READ_BUFFER_SIZE") {
                 if let Ok(data) = data.parse::<usize>() {
                     _options.read_buffer_size = data;
+                }
+            }
+
+            if let Ok(data) = env::var("READ_MAX_RETRY") {
+                if let Ok(data) = data.parse::<u8>() {
+                    _options.read_max_retry = data;
                 }
             }
         }
