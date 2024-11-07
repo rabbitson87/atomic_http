@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.20
+
+* Recovery for read_stream when use_normal_read is false.
+
 ## 0.4.19
 
 * Add option for tcpStream read_retry.
