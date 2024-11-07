@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.22
+
+* Change option for read stream's binary imcompleted.
+
 ## 0.4.21
 
 * Add option for read stream when binary imcompleted.

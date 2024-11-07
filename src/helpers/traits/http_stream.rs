@@ -228,15 +228,18 @@ async fn get_bytes_from_reader(
                     max_retry,
                     bytes.len(),
                     expected,
-                    match options.use_imcomplete_error_log {
-                        true => format!(
+                    match options.read_imcomplete_size {
+                        0 => "".into(),
+                        _ => format!(
                             ", Data:{}",
                             match find_headers_end(&bytes) {
-                                Some(headers_end) => String::from_utf8_lossy(&bytes[headers_end..]),
-                                None => String::from_utf8_lossy(&bytes),
+                                Some(headers_end) => String::from_utf8_lossy(
+                                    &bytes[headers_end..options.read_imcomplete_size]
+                                ),
+                                None =>
+                                    String::from_utf8_lossy(&bytes[..options.read_imcomplete_size]),
                             }
                         ),
-                        false => "".into(),
                     }
                 )
                 .into());
