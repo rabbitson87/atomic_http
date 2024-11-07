@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.18
+
+* Add option for tcpStream buffer size.
+
 ## 0.4.17
 
 * Add delay for connecting tcpstream with unkown error.

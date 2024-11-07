@@ -53,6 +53,7 @@ pub struct Options {
     pub read_timeout_miliseconds: u64,
     pub use_send_write_all: bool,
     pub root_path: PathBuf,
+    pub read_buffer_size: usize,
 }
 
 impl Options {
@@ -65,6 +66,7 @@ impl Options {
             read_timeout_miliseconds: 3000,
             use_send_write_all: true,
             root_path: current_dir().unwrap(),
+            read_buffer_size: 4096,
         };
 
         #[cfg(feature = "env")]
@@ -109,6 +111,12 @@ impl Options {
 
             if let Ok(data) = env::var("ROOT_PATH") {
                 _options.root_path = PathBuf::from_str(&data).unwrap();
+            }
+
+            if let Ok(data) = env::var("READ_BUFFER_SIZE") {
+                if let Ok(data) = data.parse::<usize>() {
+                    _options.read_buffer_size = data;
+                }
             }
         }
 

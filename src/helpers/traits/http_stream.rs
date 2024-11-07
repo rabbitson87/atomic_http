@@ -72,7 +72,10 @@ async fn get_bytes_from_reader(
     options: &Options,
 ) -> Result<(Vec<u8>, TcpStream), Box<dyn Error>> {
     let mut bytes: Vec<u8> = vec![];
-    let buffer_size = 4096;
+    let buffer_size = match options.read_buffer_size {
+        0 => 4096,
+        _ => options.read_buffer_size,
+    };
     let mut buf = vec![0; buffer_size];
 
     let mut headers_done = false;
