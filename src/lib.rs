@@ -45,11 +45,7 @@ pub struct Server {
 #[derive(Debug, Clone)]
 pub struct Options {
     pub no_delay: bool,
-    pub try_read_limit: u16,
-    pub try_write_limit: u16,
-    pub use_normal_read: bool,
     pub read_timeout_miliseconds: u64,
-    pub use_send_write_all: bool,
     pub root_path: PathBuf,
     pub read_buffer_size: usize,
     pub read_max_retry: u8,
@@ -60,11 +56,7 @@ impl Options {
     pub fn new() -> Options {
         let mut _options = Options {
             no_delay: true,
-            try_read_limit: 80,
-            try_write_limit: 80,
-            use_normal_read: false,
             read_timeout_miliseconds: 3000,
-            use_send_write_all: true,
             root_path: current_dir().unwrap(),
             read_buffer_size: 4096,
             read_max_retry: 3,
@@ -80,34 +72,9 @@ impl Options {
                     _options.no_delay = data;
                 }
             }
-            if let Ok(data) = env::var("TRY_READ_LIMIT") {
-                if let Ok(data) = data.parse::<u16>() {
-                    _options.try_read_limit = data;
-                }
-            }
             if let Ok(data) = env::var("READ_TIMEOUT_MILISECONDS") {
                 if let Ok(data) = data.parse::<u64>() {
                     _options.read_timeout_miliseconds = data;
-                }
-            }
-
-            if let Ok(data) = env::var("TRY_WRITE_LIMIT") {
-                if let Ok(data) = data.parse::<u16>() {
-                    _options.try_write_limit = data;
-                }
-            }
-
-            if let Ok(data) = env::var("USE_NORMAL_READ") {
-                // true, false
-                if let Ok(data) = data.parse::<bool>() {
-                    _options.use_normal_read = data;
-                }
-            }
-
-            if let Ok(data) = env::var("USE_SEND_WRITE_ALL") {
-                // true, false
-                if let Ok(data) = data.parse::<bool>() {
-                    _options.use_send_write_all = data;
                 }
             }
 

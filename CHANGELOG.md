@@ -1,5 +1,13 @@
 # Changes
 
+## 0.5.1
+
+* Remove unused several options.
+  try_read_limit: u16;
+  try_write_limit: u16;
+  use_normal_read: bool;
+  use_send_write_all: bool;
+
 ## 0.5.0
 
 * Fixed for server accept split process because of thread.

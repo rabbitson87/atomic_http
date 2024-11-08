@@ -3,7 +3,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
 use std::error::Error;
 use std::time::Duration;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt, Interest};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::helpers::traits::bytes::SplitBytes;
@@ -83,103 +83,28 @@ async fn get_bytes_from_reader(
     let mut headers_done = false;
     let mut _content_length = None;
     let mut expected_total_length = None;
-    let mut max_count = 0;
-    let mut min_count = 0;
-    match options.use_normal_read {
-        true => {
-            while retry_count < max_retry {
-                match tokio::time::timeout(
-                    Duration::from_millis(options.read_timeout_miliseconds),
-                    stream.read(&mut buf),
-                )
-                .await
-                {
-                    Ok(read_result) => match read_result {
-                        Ok(n) => {
-                            if n == 0 {
-                                // 연결이 끊겼지만 데이터가 부족한 경우
-                                if let Some(expected) = expected_total_length {
-                                    if bytes.len() < expected {
-                                        dev_print!(
-                                            "Connection closed but data incomplete: {}/{} bytes",
-                                            bytes.len(),
-                                            expected
-                                        );
-                                        retry_count += 1;
-                                        continue;
-                                    }
-                                }
-                                break;
-                            }
-                            bytes.extend_from_slice(&buf[..n]);
-
-                            if !headers_done {
-                                if let Some(headers_end) = find_headers_end(&bytes) {
-                                    headers_done = true;
-                                    _content_length = parse_content_length(&bytes[..headers_end]);
-
-                                    if let Some(length) = _content_length {
-                                        expected_total_length = Some(headers_end + length);
-                                        dev_print!(
-                                            "Expected total length: {}",
-                                            headers_end + length
-                                        );
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            } else if let Some(expected) = expected_total_length {
-                                if bytes.len() >= expected {
-                                    break;
-                                }
-                            }
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            continue;
-                        }
-                        Err(e) => {
-                            return Err(e.into());
-                        }
-                    },
-                    Err(_) => {
-                        retry_count += 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        false => loop {
-            let mut _count = 0;
-            loop {
-                let ready = stream
-                    .ready(Interest::READABLE | Interest::ERROR | Interest::WRITABLE)
-                    .await?;
-                if ready.is_error() || ready.is_read_closed() || ready.is_empty() {
-                    stream.flush().await?;
-                    return Err("error".into());
-                }
-                if ready.is_readable() {
-                    break;
-                }
-                if ready.is_writable() {
-                    tokio::time::sleep(Duration::from_nanos(1)).await;
-                    if _count > options.try_read_limit {
-                        stream.flush().await?;
-                        return Err("timeout".into());
-                    }
-                    _count += 1;
-                    continue;
-                }
-            }
-            if min_count == 0 && max_count == 0 || min_count > _count {
-                min_count = _count;
-            }
-            if max_count < _count {
-                max_count = _count;
-            }
-            match stream.try_read(&mut buf) {
+    while retry_count < max_retry {
+        match tokio::time::timeout(
+            Duration::from_millis(options.read_timeout_miliseconds),
+            stream.read(&mut buf),
+        )
+        .await
+        {
+            Ok(read_result) => match read_result {
                 Ok(n) => {
                     if n == 0 {
+                        // 연결이 끊겼지만 데이터가 부족한 경우
+                        if let Some(expected) = expected_total_length {
+                            if bytes.len() < expected {
+                                dev_print!(
+                                    "Connection closed but data incomplete: {}/{} bytes",
+                                    bytes.len(),
+                                    expected
+                                );
+                                retry_count += 1;
+                                continue;
+                            }
+                        }
                         break;
                     }
                     bytes.extend_from_slice(&buf[..n]);
@@ -190,15 +115,14 @@ async fn get_bytes_from_reader(
                             _content_length = parse_content_length(&bytes[..headers_end]);
 
                             if let Some(length) = _content_length {
-                                if bytes.len() >= headers_end + length {
-                                    break;
-                                }
+                                expected_total_length = Some(headers_end + length);
+                                dev_print!("Expected total length: {}", headers_end + length);
                             } else {
                                 break;
                             }
                         }
-                    } else if let Some(length) = _content_length {
-                        if bytes.len() >= length {
+                    } else if let Some(expected) = expected_total_length {
+                        if bytes.len() >= expected {
                             break;
                         }
                     }
@@ -207,48 +131,45 @@ async fn get_bytes_from_reader(
                     continue;
                 }
                 Err(e) => {
-                    stream.flush().await?;
                     return Err(e.into());
                 }
+            },
+            Err(_) => {
+                retry_count += 1;
+                continue;
             }
-        },
+        }
     }
+
     if bytes.len() == 0 {
         stream.flush().await?;
         return Err("no data".into());
     }
 
     // 최종 데이터 검증
-    if options.use_normal_read {
-        if let Some(expected) = expected_total_length {
-            if bytes.len() < expected {
-                stream.flush().await?;
-                return Err(format!(
-                    "Incomplete data after {} retries: got {}/{} bytes{}",
-                    max_retry,
-                    bytes.len(),
-                    expected,
-                    match options.read_imcomplete_size {
-                        0 => "".into(),
-                        _ => format!(
-                            ", Data:{}",
-                            match find_headers_end(&bytes) {
-                                Some(headers_end) => String::from_utf8_lossy(
-                                    &bytes[headers_end..options.read_imcomplete_size]
-                                ),
-                                None =>
-                                    String::from_utf8_lossy(&bytes[..options.read_imcomplete_size]),
-                            }
-                        ),
-                    }
-                )
-                .into());
-            }
+    if let Some(expected) = expected_total_length {
+        if bytes.len() < expected {
+            stream.flush().await?;
+            return Err(format!(
+                "Incomplete data after {} retries: got {}/{} bytes{}",
+                max_retry,
+                bytes.len(),
+                expected,
+                match options.read_imcomplete_size {
+                    0 => "".into(),
+                    _ => format!(
+                        ", Data:{}",
+                        match find_headers_end(&bytes) {
+                            Some(headers_end) => String::from_utf8_lossy(
+                                &bytes[headers_end..options.read_imcomplete_size]
+                            ),
+                            None => String::from_utf8_lossy(&bytes[..options.read_imcomplete_size]),
+                        }
+                    ),
+                }
+            )
+            .into());
         }
-    }
-
-    if max_count != 0 && min_count != 0 {
-        dev_print!("min_count: {:?}, max_count: {:?}", min_count, max_count);
     }
 
     Ok((bytes, stream))
