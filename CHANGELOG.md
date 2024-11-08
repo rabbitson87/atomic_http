@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.0
+
+* Fixed for server accept split process because of thread.
+
 ## 0.4.22
 
 * Change option for read stream's binary imcompleted.

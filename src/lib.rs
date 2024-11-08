@@ -39,8 +39,6 @@ mod helpers;
 pub struct Server {
     #[cfg(not(feature = "tokio_rustls"))]
     pub listener: TcpListener,
-    #[cfg(feature = "tokio_rustls")]
-    pub stream: TlsStream<TcpStream>,
     pub options: Options,
 }
 
@@ -150,14 +148,13 @@ impl Server {
         })
     }
     #[cfg(feature = "tokio_rustls")]
-    pub async fn new(stream: TlsStream<TcpStream>) -> Result<Server, Box<dyn Error>> {
+    pub async fn new() -> Result<Server, Box<dyn Error>> {
         Ok(Server {
-            stream,
             options: Options::new(),
         })
     }
     #[cfg(not(feature = "tokio_rustls"))]
-    pub async fn accept(&self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
+    pub async fn accept(&self) -> Result<(TcpStream, Options), Box<dyn Error>> {
         use std::time::Duration;
 
         let (stream, _) = match self.listener.accept().await {
@@ -172,12 +169,20 @@ impl Server {
                 return Err(e.into());
             }
         };
-        Ok(stream.parse_request(&self.options).await?)
+        Ok((stream, self.options.clone()))
+    }
+    pub async fn parse_request(
+        stream: TcpStream,
+        options: Options,
+    ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
+        Ok(stream.parse_request(&options).await?)
     }
     #[cfg(feature = "tokio_rustls")]
-    pub async fn accept(self) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
-        let options = self.options.clone();
-        let (stream, _connect) = self.stream.into_inner();
+    pub async fn parse_request(
+        stream: TlsStream<TcpStream>,
+        options: Options,
+    ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
+        let (stream, _connect) = stream.into_inner();
         Ok(stream.parse_request(&options).await?)
     }
     pub fn set_no_delay(&mut self, no_delay: bool) {

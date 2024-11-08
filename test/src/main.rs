@@ -14,7 +14,14 @@ async fn main() {
     println!("start server on: {}", address);
     loop {
         match server.accept().await {
-            Ok((request, response)) => tokio::spawn(async move {
+            Ok((tcpstream, options)) => tokio::spawn(async move {
+                let (request, response) = match Server::parse_request(tcpstream, options).await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        println!("failed to parse request: {e:?}");
+                        return;
+                    }
+                };
                 www_service(request, response).await.unwrap_or_else(|e| {
                     println!("an error occured; error = {:?}", e);
                 });
