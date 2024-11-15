@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.2
+
+* Fixed for read stream when first read.
+
 ## 0.5.1
 
 * Remove unused several options.

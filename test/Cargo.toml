@@ -11,7 +11,7 @@ tokio = { version = "1.39.3", features = [
     "fs",
 ] }
 http = "1.1.0"
-atomic_http = { path = "../", features = ["response_file", "env"] }
+atomic_http = { path = "../", features = ["response_file", "env", "debug"] }
 urlencoding = "2.1.3"
 
 [profile.dev]

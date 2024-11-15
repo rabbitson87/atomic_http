@@ -117,6 +117,11 @@ async fn get_bytes_from_reader(
                             if let Some(length) = _content_length {
                                 expected_total_length = Some(headers_end + length);
                                 dev_print!("Expected total length: {}", headers_end + length);
+                                if let Some(expected) = expected_total_length {
+                                    if bytes.len() >= expected {
+                                        break;
+                                    }
+                                }
                             } else {
                                 break;
                             }
