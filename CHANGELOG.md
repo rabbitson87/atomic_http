@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.3
+
+* Add for request body with ipAddr.
+
 ## 0.5.2
 
 * Fixed for read stream when first read.

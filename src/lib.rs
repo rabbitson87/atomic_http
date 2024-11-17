@@ -1,4 +1,4 @@
-use std::{env::current_dir, error::Error, io, path::PathBuf};
+use std::{env::current_dir, error::Error, io, net::SocketAddr, path::PathBuf};
 
 #[cfg(feature = "env")]
 use std::str::FromStr;
@@ -50,6 +50,7 @@ pub struct Options {
     pub read_buffer_size: usize,
     pub read_max_retry: u8,
     pub read_imcomplete_size: usize,
+    current_client_addr: Option<SocketAddr>,
 }
 
 impl Options {
@@ -61,6 +62,7 @@ impl Options {
             read_buffer_size: 4096,
             read_max_retry: 3,
             read_imcomplete_size: 0,
+            current_client_addr: None,
         };
 
         #[cfg(feature = "env")]
@@ -121,10 +123,10 @@ impl Server {
         })
     }
     #[cfg(not(feature = "tokio_rustls"))]
-    pub async fn accept(&self) -> Result<(TcpStream, Options), Box<dyn Error>> {
+    pub async fn accept(&mut self) -> Result<(TcpStream, Options), Box<dyn Error>> {
         use std::time::Duration;
 
-        let (stream, _) = match self.listener.accept().await {
+        let (stream, addr) = match self.listener.accept().await {
             Ok(data) => data,
             Err(e) => {
                 if is_connection_error(&e) {
@@ -136,8 +138,10 @@ impl Server {
                 return Err(e.into());
             }
         };
+        self.options.current_client_addr = Some(addr);
         Ok((stream, self.options.clone()))
     }
+    #[cfg(not(feature = "tokio_rustls"))]
     pub async fn parse_request(
         stream: TcpStream,
         options: Options,
@@ -161,6 +165,7 @@ pub struct Body {
     pub bytes: Vec<u8>,
     pub body: String,
     pub len: usize,
+    pub ip: Option<SocketAddr>,
 }
 
 pub struct Writer {

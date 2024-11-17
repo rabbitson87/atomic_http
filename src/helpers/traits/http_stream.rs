@@ -45,11 +45,12 @@ impl StreamHttp for TcpStream {
 }
 
 fn get_parse_result_from_request(
-    request: Request<Body>,
+    mut request: Request<Body>,
     stream: TcpStream,
     options: &Options,
 ) -> Result<(Request<Body>, Response<Writer>), Box<dyn Error>> {
     let version = request.version();
+    request.body_mut().ip = options.current_client_addr;
 
     Ok((
         request,
@@ -285,6 +286,7 @@ async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Box<dyn Error>> {
             body: String::new(),
             bytes,
             len,
+            ip: None,
         })?;
 
     Ok(request)

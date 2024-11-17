@@ -9,7 +9,6 @@ async fn main() {
     dotenv().ok();
     let address: String = format!("0.0.0.0:{}", 9000);
     let mut server = Server::new(&address).await.unwrap();
-    server.options.read_buffer_size = 1024 * 4;
 
     println!("start server on: {}", address);
     loop {
@@ -38,11 +37,12 @@ async fn www_service(
     request: Request<Body>,
     mut response: Response<Writer>,
 ) -> Result<(), Box<dyn Error>> {
+    println!("ip: {:?}", request.body().ip);
+    println!(
+        "request: {:?}\n",
+        String::from_utf8_lossy(request.body().bytes.as_slice())
+    );
     if request.headers().get("host") != None && request.uri().path() != "/" {
-        println!(
-            "request: {:?}\n",
-            String::from_utf8_lossy(request.body().bytes.as_slice())
-        );
         let path = request.uri().path()[1..].to_owned();
 
         if path.contains(".") {
@@ -64,11 +64,6 @@ async fn www_service(
             let path = dir.join("app/index.html");
             response.body_mut().response_file(path)?;
         }
-    } else {
-        println!(
-            "request: {:?}\n",
-            String::from_utf8_lossy(request.body().bytes.as_slice())
-        );
     }
 
     response.responser().await?;
