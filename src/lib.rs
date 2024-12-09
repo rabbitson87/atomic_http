@@ -105,6 +105,13 @@ impl Options {
 
         _options
     }
+
+    pub fn get_request_ip(&self) -> String {
+        match &self.current_client_addr {
+            Some(addr) => addr.ip().to_string(),
+            None => "".into(),
+        }
+    }
 }
 
 impl Server {

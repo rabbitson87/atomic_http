@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.4
+
+* Add get request ip with option.
+
 ## 0.5.3
 
 * Add for request body with ipAddr.

@@ -14,6 +14,8 @@ async fn main() {
     loop {
         match server.accept().await {
             Ok((tcpstream, options)) => tokio::spawn(async move {
+                let ip = options.get_request_ip();
+                println!("ip: {:?}", ip);
                 let (request, response) = match Server::parse_request(tcpstream, options).await {
                     Ok(data) => data,
                     Err(e) => {
