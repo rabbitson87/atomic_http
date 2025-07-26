@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::str::FromStr;
 
 use async_trait::async_trait;
@@ -13,22 +12,25 @@ use crate::helpers::traits::{
     http_stream::{Form, Part},
     GetHeaderChild,
 };
+#[cfg(feature = "arena")]
+use crate::ArenaBody;
 use crate::Body;
+use crate::SendableError;
 
 use super::StringUtil;
 
 #[async_trait]
 pub trait RequestUtils {
-    async fn get_json<'a, T>(&'a mut self) -> Result<T, Box<dyn Error>>
+    fn get_json<'a, T>(&'a mut self) -> Result<T, SendableError>
     where
         T: Deserialize<'a>;
-    async fn get_text(&mut self) -> Result<String, Box<dyn Error>>;
-    async fn get_multi_part(&mut self) -> Result<Option<Form>, Box<dyn Error>>;
+    fn get_text(&mut self) -> Result<String, SendableError>;
+    async fn get_multi_part(&mut self) -> Result<Option<Form>, SendableError>;
 }
 
 #[async_trait]
 impl RequestUtils for Request<Body> {
-    async fn get_json<'a, T>(&'a mut self) -> Result<T, Box<dyn Error>>
+    fn get_json<'a, T>(&'a mut self) -> Result<T, SendableError>
     where
         T: Deserialize<'a>,
     {
@@ -42,14 +44,16 @@ impl RequestUtils for Request<Body> {
         };
         Ok(body)
     }
-    async fn get_text(&mut self) -> Result<String, Box<dyn Error>> {
+
+    fn get_text(&mut self) -> Result<String, SendableError> {
         if self.body().len > 0 {
             self.body_mut().body = String::from_utf8_lossy(self.body().bytes.as_slice()).into();
         }
 
         Ok(self.body().body.copy_string())
     }
-    async fn get_multi_part(&mut self) -> Result<Option<Form>, Box<dyn Error>> {
+
+    async fn get_multi_part(&mut self) -> Result<Option<Form>, SendableError> {
         let content_type = self.headers().get("content-type");
         if content_type.is_some()
             && content_type
@@ -143,5 +147,33 @@ impl RequestUtils for Request<Body> {
             return Ok(Some(form));
         }
         Ok(None)
+    }
+}
+#[cfg(feature = "arena")]
+pub trait RequestUtilsArena {
+    fn get_json_arena<T>(&self) -> Result<T, SendableError>
+    where
+        T: for<'de> serde::Deserialize<'de>;
+
+    fn get_text_arena(&self) -> Result<&str, SendableError>;
+}
+
+#[cfg(feature = "arena")]
+impl RequestUtilsArena for Request<ArenaBody> {
+    fn get_json_arena<T>(&self) -> Result<T, SendableError>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let body_str = self.body().get_body_str()?;
+        if body_str.is_empty() {
+            return Err("Empty body".into());
+        }
+
+        let json: T = serde_json::from_str(body_str)?;
+        Ok(json)
+    }
+
+    fn get_text_arena(&self) -> Result<&str, SendableError> {
+        Ok(self.body().get_body_str()?)
     }
 }

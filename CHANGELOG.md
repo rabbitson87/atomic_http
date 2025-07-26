@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.0
+
+* Add arena mode and arena mode is default.
+
 ## 0.5.4
 
 * Add get request ip with option.

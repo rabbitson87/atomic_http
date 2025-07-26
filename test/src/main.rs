@@ -1,6 +1,6 @@
-use std::error::Error;
-
-use atomic_http::{external::dotenv::dotenv, Body, ResponseUtil, Server, Writer};
+use atomic_http::{
+    external::dotenv::dotenv, ArenaBody, ResponseUtil, SendableError, Server, Writer,
+};
 use http::{Request, Response};
 use tokio::fs::try_exists;
 
@@ -13,16 +13,17 @@ async fn main() {
     println!("start server on: {}", address);
     loop {
         match server.accept().await {
-            Ok((tcpstream, options)) => tokio::spawn(async move {
+            Ok((tcpstream, options, herd)) => tokio::spawn(async move {
                 let ip = options.get_request_ip();
                 println!("ip: {:?}", ip);
-                let (request, response) = match Server::parse_request(tcpstream, options).await {
-                    Ok(data) => data,
-                    Err(e) => {
-                        println!("failed to parse request: {e:?}");
-                        return;
-                    }
-                };
+                let (request, response) =
+                    match Server::parse_request_arena(tcpstream, options, herd).await {
+                        Ok(data) => data,
+                        Err(e) => {
+                            println!("failed to parse request: {e:?}");
+                            return;
+                        }
+                    };
                 www_service(request, response).await.unwrap_or_else(|e| {
                     println!("an error occured; error = {:?}", e);
                 });
@@ -36,13 +37,13 @@ async fn main() {
 }
 
 async fn www_service(
-    request: Request<Body>,
+    request: Request<ArenaBody>,
     mut response: Response<Writer>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), SendableError> {
     println!("ip: {:?}", request.body().ip);
     println!(
         "request: {:?}\n",
-        String::from_utf8_lossy(request.body().bytes.as_slice())
+        String::from_utf8_lossy(request.body().get_raw_data())
     );
     if request.headers().get("host") != None && request.uri().path() != "/" {
         let path = request.uri().path()[1..].to_owned();

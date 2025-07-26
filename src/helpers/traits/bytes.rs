@@ -22,6 +22,7 @@ impl SplitBytes for &[u8] {
         }
         result
     }
+
     fn split_header_body(&self) -> (Vec<u8>, Vec<u8>) {
         let mut header = Vec::new();
         let mut body = Vec::new();
