@@ -1,5 +1,3 @@
-#[cfg(feature = "arena")]
-#[cfg(feature = "response_file")]
 use std::path::Path;
 use std::{env::current_dir, io, net::SocketAddr, path::PathBuf};
 
@@ -9,8 +7,9 @@ use std::str::FromStr;
 #[cfg(feature = "arena")]
 use bumpalo_herd::{Herd, Member};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "arena")]
 use std::sync::Arc;
+
+pub mod helpers;
 
 pub use helpers::traits::http_request::RequestUtils;
 #[cfg(feature = "arena")]
@@ -19,6 +18,13 @@ pub use helpers::traits::http_response::ResponseUtil;
 #[cfg(feature = "arena")]
 pub use helpers::traits::http_response::ResponseUtilArena;
 pub use helpers::traits::http_stream::StreamHttp;
+
+#[cfg(feature = "arena")]
+pub use helpers::traits::http_stream::{StreamHttpArena, StreamHttpArenaWriter};
+
+pub use helpers::traits::zero_copy::{
+    parse_json_file, CacheStats, CachedFileData, FileLoadResult, ZeroCopyCache, ZeroCopyFile,
+};
 
 pub mod external {
     pub use async_trait;
@@ -33,6 +39,8 @@ pub mod external {
     pub use bumpalo;
     #[cfg(feature = "arena")]
     pub use bumpalo_herd;
+
+    pub use memmap2;
 }
 
 use http::{Request, Response};
@@ -40,8 +48,8 @@ use http::{Request, Response};
 #[macro_export]
 macro_rules! dev_print {
     ($($rest:tt)*) => {
-        if (cfg!(feature = "debug")) {
-            std::println!($($rest)*)
+        if cfg!(feature = "debug") {
+            println!($($rest)*)
         }
     };
 }
@@ -53,8 +61,6 @@ use tokio::net::TcpStream;
 #[cfg(feature = "tokio_rustls")]
 use tokio_rustls::server::TlsStream;
 
-mod helpers;
-
 pub type SendableError = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct Server {
@@ -63,6 +69,7 @@ pub struct Server {
     pub options: Options,
     #[cfg(feature = "arena")]
     pub herd: Arc<Herd>,
+    pub zero_copy_cache: Option<Arc<ZeroCopyCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +80,9 @@ pub struct Options {
     pub read_buffer_size: usize,
     pub read_max_retry: u8,
     pub read_imcomplete_size: usize,
-    current_client_addr: Option<SocketAddr>,
+    pub current_client_addr: Option<SocketAddr>,
+    pub zero_copy_threshold: usize,
+    pub enable_file_cache: bool,
 }
 
 impl Options {
@@ -86,6 +95,8 @@ impl Options {
             read_max_retry: 3,
             read_imcomplete_size: 0,
             current_client_addr: None,
+            zero_copy_threshold: 1024 * 1024, // 1MB 이상 파일에 제로카피 적용
+            enable_file_cache: true,
         };
 
         #[cfg(feature = "env")]
@@ -125,6 +136,18 @@ impl Options {
                     _options.read_imcomplete_size = data;
                 }
             }
+
+            if let Ok(data) = env::var("ZERO_COPY_THRESHOLD") {
+                if let Ok(data) = data.parse::<usize>() {
+                    _options.zero_copy_threshold = data;
+                }
+            }
+
+            if let Ok(data) = env::var("ENABLE_FILE_CACHE") {
+                if let Ok(data) = data.parse::<bool>() {
+                    _options.enable_file_cache = data;
+                }
+            }
         }
 
         _options
@@ -136,39 +159,56 @@ impl Options {
             None => "".into(),
         }
     }
+
+    pub fn set_zero_copy_threshold(&mut self, threshold: usize) {
+        self.zero_copy_threshold = threshold;
+    }
+
+    pub fn enable_zero_copy_cache(&mut self, enable: bool) {
+        self.enable_file_cache = enable;
+    }
 }
 
 impl Server {
-    #[cfg(not(feature = "tokio_rustls"))]
-    #[cfg(feature = "arena")]
+    #[cfg(all(feature = "arena", not(feature = "tokio_rustls")))]
     pub async fn new(address: &str) -> Result<Server, SendableError> {
         let listener = TcpListener::bind(address).await?;
+        let zero_copy_cache = Some(Arc::new(ZeroCopyCache::default()));
+
+        dev_print!("✅ Server initialized with Arena support");
+
         Ok(Server {
             listener,
             options: Options::new(),
             herd: Arc::new(Herd::new()),
+            zero_copy_cache,
         })
     }
 
-    #[cfg(not(feature = "tokio_rustls"))]
-    #[cfg(not(feature = "arena"))]
+    #[cfg(all(not(feature = "arena"), not(feature = "tokio_rustls")))]
     pub async fn new(address: &str) -> Result<Server, SendableError> {
         let listener = TcpListener::bind(address).await?;
+        let zero_copy_cache = Some(Arc::new(ZeroCopyCache::default()));
+
+        dev_print!("✅ Server initialized with Zero-copy support");
+
         Ok(Server {
             listener,
             options: Options::new(),
+            zero_copy_cache,
         })
     }
 
     #[cfg(feature = "tokio_rustls")]
     pub async fn new() -> Result<Server, SendableError> {
+        let zero_copy_cache = Some(Arc::new(ZeroCopyCache::default()));
         Ok(Server {
             options: Options::new(),
+            zero_copy_cache,
         })
     }
 
-    #[cfg(not(feature = "tokio_rustls"))]
-    #[cfg(feature = "arena")]
+    #[cfg(all(feature = "arena", not(feature = "tokio_rustls")))]
     pub async fn accept(&mut self) -> Result<(TcpStream, Options, Arc<Herd>), SendableError> {
         use std::time::Duration;
 
@@ -187,8 +227,7 @@ impl Server {
         Ok((stream, self.options.clone(), self.herd.clone()))
     }
 
-    #[cfg(not(feature = "tokio_rustls"))]
-    #[cfg(not(feature = "arena"))]
+    #[cfg(all(not(feature = "arena"), not(feature = "tokio_rustls")))]
     pub async fn accept(&mut self) -> Result<(TcpStream, Options), SendableError> {
         use std::time::Duration;
 
@@ -255,6 +294,22 @@ impl Server {
     pub fn get_herd(&self) -> &Arc<Herd> {
         &self.herd
     }
+
+    pub fn get_zero_copy_cache(&self) -> Option<&Arc<ZeroCopyCache>> {
+        self.zero_copy_cache.as_ref()
+    }
+
+    pub fn set_zero_copy_cache(&mut self, cache: ZeroCopyCache) {
+        self.zero_copy_cache = Some(Arc::new(cache));
+    }
+
+    /// 캐시 통계 출력
+    pub fn print_cache_stats(&self) {
+        if let Some(cache) = &self.zero_copy_cache {
+            let stats = cache.stats();
+            println!("📊 {}", stats);
+        }
+    }
 }
 
 pub struct Body {
@@ -265,6 +320,7 @@ pub struct Body {
 }
 
 #[cfg(feature = "arena")]
+#[repr(align(64))]
 pub struct ArenaBody {
     _member: Box<Member<'static>>,
     data_ptr: *const u8,
@@ -325,6 +381,16 @@ impl ArenaBody {
     pub fn get_raw_data(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.data_ptr, self.total_len) }
     }
+
+    // 제로카피 JSON 파싱 추가
+    pub fn parse_json_zero_copy<T>(&self) -> Result<T, SendableError>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let body_str = self.get_body_str()?;
+        dev_print!("Arena zero-copy JSON parsing: {} bytes", body_str.len());
+        Ok(serde_json::from_str(body_str)?)
+    }
 }
 
 #[cfg(feature = "arena")]
@@ -377,8 +443,6 @@ impl ArenaWriter {
 
     pub async fn write_arena_bytes(&mut self) -> Result<(), SendableError> {
         if !self.response_data_ptr.is_null() && self.response_data_len > 0 {
-            // 데이터를 미리 추출해서 borrowing 충돌 방지
-
             use crate::helpers::traits::http_response::SendBytes;
             let data_ptr = self.response_data_ptr;
             let data_len = self.response_data_len;
@@ -390,7 +454,7 @@ impl ArenaWriter {
         Ok(())
     }
 
-    pub fn set_arena_response(&mut self, data: &str) -> Result<(), SendableError> {
+    pub fn set_arena_response(&mut self, data: &str) -> Result<bool, SendableError> {
         let member = self.herd.get();
         let allocated_data = member.alloc_str(data);
 
@@ -402,10 +466,10 @@ impl ArenaWriter {
         self.response_data_ptr = allocated_data.as_ptr();
         self.response_data_len = allocated_data.len();
         self._member = Some(member_box);
-        Ok(())
+        Ok(true)
     }
 
-    pub fn set_arena_json<T>(&mut self, data: &T) -> Result<(), SendableError>
+    pub fn set_arena_json<T>(&mut self, data: &T) -> Result<bool, SendableError>
     where
         T: serde::Serialize,
     {
@@ -431,10 +495,31 @@ impl ArenaWriter {
         P: AsRef<Path>,
     {
         let root_path = &self.options.root_path;
-        let path = root_path.join(path);
+        let file_path = root_path.join(path);
 
         let member = self.herd.get();
-        let path_str = path.to_str().unwrap();
+
+        if let Ok(metadata) = std::fs::metadata(&file_path) {
+            let file_size = metadata.len() as usize;
+            if file_size <= self.options.zero_copy_threshold {
+                let path_with_marker =
+                    format!("__ZERO_COPY_FILE__:{}", file_path.to_str().unwrap());
+                let allocated_path = member.alloc_str(&path_with_marker);
+
+                let member_box = unsafe {
+                    std::mem::transmute::<Box<Member<'_>>, Box<Member<'static>>>(Box::new(member))
+                };
+
+                self.response_data_ptr = allocated_path.as_ptr();
+                self.response_data_len = allocated_path.len();
+                self._member = Some(member_box);
+                self.use_file = true;
+                return Ok(());
+            }
+        }
+
+        // 기존 방식
+        let path_str = file_path.to_str().unwrap();
         let allocated_path = member.alloc_str(path_str);
 
         let member_box = unsafe {
@@ -497,5 +582,15 @@ impl TestData {
             ],
             payload: vec![0u8; payload_size * 3 / 4], // 대부분은 바이너리 데이터
         }
+    }
+
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), SendableError> {
+        let json_str = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json_str)?;
+        Ok(())
+    }
+
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, SendableError> {
+        parse_json_file(path)
     }
 }

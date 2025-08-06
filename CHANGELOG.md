@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.1
+
+* Add zero_copy module and zero_copy module to be default.
+
 ## 0.6.0
 
 * Add arena mode and arena mode is default.
