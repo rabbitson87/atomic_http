@@ -23,7 +23,8 @@ pub use helpers::traits::http_stream::StreamHttp;
 pub use helpers::traits::http_stream::{StreamHttpArena, StreamHttpArenaWriter};
 
 pub use helpers::traits::zero_copy::{
-    parse_json_file, CacheStats, CachedFileData, FileLoadResult, ZeroCopyCache, ZeroCopyFile,
+    parse_json_file, CacheConfig, CacheStats, CachedFileData, FileLoadResult, ZeroCopyCache,
+    ZeroCopyFile,
 };
 
 pub mod external {
@@ -69,7 +70,6 @@ pub struct Server {
     pub options: Options,
     #[cfg(feature = "arena")]
     pub herd: Arc<Herd>,
-    pub zero_copy_cache: Option<Arc<ZeroCopyCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,120 +170,40 @@ impl Options {
 }
 
 impl Server {
-    #[cfg(all(feature = "arena", not(feature = "tokio_rustls")))]
     pub async fn new(address: &str) -> Result<Server, SendableError> {
-        let listener = TcpListener::bind(address).await?;
-        let zero_copy_cache = Some(Arc::new(ZeroCopyCache::default()));
-
         dev_print!("✅ Server initialized with Arena support");
 
         Ok(Server {
-            listener,
+            #[cfg(not(feature = "tokio_rustls"))]
+            listener: TcpListener::bind(address).await?,
             options: Options::new(),
+            #[cfg(feature = "arena")]
             herd: Arc::new(Herd::new()),
-            zero_copy_cache,
         })
-    }
-
-    #[cfg(all(not(feature = "arena"), not(feature = "tokio_rustls")))]
-    pub async fn new(address: &str) -> Result<Server, SendableError> {
-        let listener = TcpListener::bind(address).await?;
-        let zero_copy_cache = Some(Arc::new(ZeroCopyCache::default()));
-
-        dev_print!("✅ Server initialized with Zero-copy support");
-
-        Ok(Server {
-            listener,
-            options: Options::new(),
-            zero_copy_cache,
-        })
-    }
-
-    #[cfg(feature = "tokio_rustls")]
-    pub async fn new() -> Result<Server, SendableError> {
-        let zero_copy_cache = Some(Arc::new(ZeroCopyCache::default()));
-        Ok(Server {
-            options: Options::new(),
-            zero_copy_cache,
-        })
-    }
-
-    #[cfg(all(feature = "arena", not(feature = "tokio_rustls")))]
-    pub async fn accept(&mut self) -> Result<(TcpStream, Options, Arc<Herd>), SendableError> {
-        use std::time::Duration;
-
-        let (stream, addr) = match self.listener.accept().await {
-            Ok(data) => data,
-            Err(e) => {
-                if is_connection_error(&e) {
-                    return Err(e.into());
-                }
-                dev_print!("Accept Error: {:?}", e);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                return Err(e.into());
-            }
-        };
-        self.options.current_client_addr = Some(addr);
-        Ok((stream, self.options.clone(), self.herd.clone()))
-    }
-
-    #[cfg(all(not(feature = "arena"), not(feature = "tokio_rustls")))]
-    pub async fn accept(&mut self) -> Result<(TcpStream, Options), SendableError> {
-        use std::time::Duration;
-
-        let (stream, addr) = match self.listener.accept().await {
-            Ok(data) => data,
-            Err(e) => {
-                if is_connection_error(&e) {
-                    return Err(e.into());
-                }
-                dev_print!("Accept Error: {:?}", e);
-
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                return Err(e.into());
-            }
-        };
-        self.options.current_client_addr = Some(addr);
-        Ok((stream, self.options.clone()))
     }
 
     #[cfg(not(feature = "tokio_rustls"))]
-    pub async fn parse_request(
-        stream: TcpStream,
-        options: Options,
-    ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
-        Ok(stream.parse_request(&options).await?)
-    }
+    pub async fn accept(&mut self) -> Result<Accept, SendableError> {
+        use std::time::Duration;
 
-    #[cfg(feature = "tokio_rustls")]
-    pub async fn parse_request(
-        stream: TlsStream<TcpStream>,
-        options: Options,
-    ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
-        let (stream, _connect) = stream.into_inner();
-        Ok(stream.parse_request(&options).await?)
-    }
-
-    #[cfg(feature = "arena")]
-    pub async fn parse_request_arena(
-        stream: TcpStream,
-        options: Options,
-        herd: Arc<Herd>,
-    ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError> {
-        use crate::helpers::traits::http_stream::StreamHttpArena;
-
-        Ok(stream.parse_request_arena(&options, herd).await?)
-    }
-
-    #[cfg(feature = "arena")]
-    pub async fn parse_request_arena_writer(
-        stream: TcpStream,
-        options: Options,
-        herd: Arc<Herd>,
-    ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
-        use crate::helpers::traits::http_stream::StreamHttpArenaWriter;
-
-        Ok(stream.parse_request_arena_writer(&options, herd).await?)
+        let (stream, addr) = match self.listener.accept().await {
+            Ok(data) => data,
+            Err(e) => {
+                if is_connection_error(&e) {
+                    return Err(e.into());
+                }
+                dev_print!("Accept Error: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                return Err(e.into());
+            }
+        };
+        self.options.current_client_addr = Some(addr);
+        Ok(Accept::new(
+            stream,
+            self.options.clone(),
+            #[cfg(feature = "arena")]
+            self.herd.clone(),
+        ))
     }
 
     pub fn set_no_delay(&mut self, no_delay: bool) {
@@ -295,20 +215,54 @@ impl Server {
         &self.herd
     }
 
-    pub fn get_zero_copy_cache(&self) -> Option<&Arc<ZeroCopyCache>> {
-        self.zero_copy_cache.as_ref()
-    }
-
-    pub fn set_zero_copy_cache(&mut self, cache: ZeroCopyCache) {
-        self.zero_copy_cache = Some(Arc::new(cache));
-    }
-
     /// 캐시 통계 출력
     pub fn print_cache_stats(&self) {
-        if let Some(cache) = &self.zero_copy_cache {
-            let stats = cache.stats();
-            println!("📊 {}", stats);
+        let stats = ZeroCopyCache::global().stats();
+        println!("📊 {}", stats);
+    }
+}
+
+pub struct Accept {
+    #[cfg(not(feature = "tokio_rustls"))]
+    pub tcp_stream: TcpStream,
+
+    #[cfg(feature = "tokio_rustls")]
+    pub tcp_stream: TlsStream<TcpStream>,
+
+    pub option: Options,
+
+    #[cfg(feature = "arena")]
+    pub herd: Arc<Herd>,
+}
+
+impl Accept {
+    pub fn new(
+        tcp_stream: TcpStream,
+        option: Options,
+        #[cfg(feature = "arena")] herd: Arc<Herd>,
+    ) -> Self {
+        Self {
+            tcp_stream,
+            option,
+            #[cfg(feature = "arena")]
+            herd,
         }
+    }
+
+    pub async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), SendableError> {
+        Ok(self.tcp_stream.parse_request(&self.option).await?)
+    }
+
+    #[cfg(feature = "arena")]
+    pub async fn parse_request_arena_writer(
+        self,
+    ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
+        use crate::helpers::traits::http_stream::StreamHttpArenaWriter;
+
+        Ok(self
+            .tcp_stream
+            .parse_request_arena_writer(&self.option, self.herd)
+            .await?)
     }
 }
 

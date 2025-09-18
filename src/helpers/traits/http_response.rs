@@ -9,13 +9,6 @@ use crate::{SendableError, Writer};
 use std::path::Path;
 
 use crate::helpers::traits::zero_copy::ZeroCopyCache;
-use std::sync::OnceLock;
-
-static ZERO_COPY_CACHE: OnceLock<ZeroCopyCache> = OnceLock::new();
-
-fn get_zero_copy_cache() -> &'static ZeroCopyCache {
-    ZERO_COPY_CACHE.get_or_init(|| ZeroCopyCache::default())
-}
 
 impl Writer {
     pub async fn write_bytes(&mut self) -> Result<(), SendableError> {
@@ -175,7 +168,7 @@ impl ResponseUtil for Response<Writer> {
         let file_path = &self.body().body[19..]; // "__ZERO_COPY_FILE__:" 이후의 경로
 
         // 캐시를 사용한 파일 로드
-        let cache = get_zero_copy_cache();
+        let cache = ZeroCopyCache::global();
         let file_result = cache.load_file(file_path)?;
         let file_data = file_result.as_bytes();
         let content_length = file_data.len();
@@ -391,7 +384,7 @@ impl ResponseUtilArena for Response<ArenaWriter> {
         use http::header::CONTENT_TYPE;
 
         // 캐시를 사용한 파일 로드
-        let file_result = get_zero_copy_cache().load_file(file_path)?;
+        let file_result = ZeroCopyCache::global().load_file(file_path)?;
         let file_data = file_result.as_bytes();
         let content_length = file_data.len();
 

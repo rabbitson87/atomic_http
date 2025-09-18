@@ -18,9 +18,9 @@ async fn run_simple_benchmark_server(port: u16, server_ready: Arc<Notify>) {
 
         loop {
             match server.accept().await {
-                Ok((stream, options, herd)) => {
+                Ok(accept) => {
                     tokio::spawn(async move {
-                        match Server::parse_request_arena_writer(stream, options, herd).await {
+                        match accept.parse_request_arena_writer().await {
                             Ok((request, mut response)) => {
                                 let method = request.method().clone();
                                 let path = request.uri().path().to_string();

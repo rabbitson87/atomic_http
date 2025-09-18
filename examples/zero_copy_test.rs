@@ -1,10 +1,7 @@
 use atomic_http::*;
 use clap::{Arg, Command};
-use http::StatusCode;
 use serde_json::json;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // 테스트용 JSON 파일들 생성
@@ -53,6 +50,9 @@ async fn create_test_json_files() -> Result<(), SendableError> {
 // Arena + 제로카피 서버
 #[cfg(all(feature = "arena", feature = "response_file"))]
 async fn run_zero_copy_server(port: u16) -> Result<(), SendableError> {
+    use http::StatusCode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     println!("🚀 Arena + Zero-copy 서버 시작 (포트: {})", port);
     let mut server = Server::new(&format!("127.0.0.1:{}", port)).await?;
     println!("✅ 하이브리드 서버 실행 중! Arena + memmap2 제로카피");
@@ -60,13 +60,13 @@ async fn run_zero_copy_server(port: u16) -> Result<(), SendableError> {
     let request_count = Arc::new(AtomicUsize::new(0));
 
     loop {
-        let (stream, options, herd) = server.accept().await?;
+        let accept = server.accept().await?;
         let req_count = request_count.clone();
 
         tokio::spawn(async move {
             let req_num = req_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-            match Server::parse_request_arena_writer(stream, options, herd).await {
+            match Server::parse_request_arena_writeraccept.await {
                 Ok((request, mut response)) => {
                     let start_time = Instant::now();
                     let path = request.uri().path();

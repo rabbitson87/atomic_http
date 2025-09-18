@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use crate::dev_print;
 
@@ -194,6 +194,26 @@ impl CachedFileData {
     }
 }
 
+/// 캐시 설정 구조체
+#[derive(Debug, Clone)]
+pub struct CacheConfig {
+    pub max_cache_files: usize,
+    pub max_cache_file_size: usize,
+    pub cache_duration: Duration,
+    pub total_cache_size_limit: usize,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_cache_files: 50,                    // 최대 50개 파일
+            max_cache_file_size: 1024 * 1024,      // 1MB 이하 파일만 메모리 캐시
+            total_cache_size_limit: 50 * 1024 * 1024, // 총 50MB 캐시 제한
+            cache_duration: Duration::from_secs(300),  // 5분 캐시 유지
+        }
+    }
+}
+
 /// 하이브리드 파일 캐시 관리자
 /// - 작은 파일: 메모리에 완전히 로드하여 캐시
 /// - 큰 파일: 필요할 때마다 memmap2 사용 (캐시 안함)
@@ -206,10 +226,13 @@ pub struct ZeroCopyCache {
     total_cache_size_limit: usize,
 }
 
+// 전역 캐시 인스턴스
+static GLOBAL_CACHE: OnceLock<ZeroCopyCache> = OnceLock::new();
+
 impl ZeroCopyCache {
     pub fn new(
-        max_cache_files: usize, 
-        max_cache_file_size: usize, 
+        max_cache_files: usize,
+        max_cache_file_size: usize,
         total_cache_size_limit: usize,
         cache_duration: Duration
     ) -> Self {
@@ -222,14 +245,33 @@ impl ZeroCopyCache {
         }
     }
 
+    /// 설정으로부터 캐시 생성
+    pub fn from_config(config: CacheConfig) -> Self {
+        Self::new(
+            config.max_cache_files,
+            config.max_cache_file_size,
+            config.total_cache_size_limit,
+            config.cache_duration,
+        )
+    }
+
     /// 기본 설정으로 캐시 생성
     pub fn default() -> Self {
-        Self::new(
-            50,                           // 최대 50개 파일
-            1024 * 1024,                 // 1MB 이하 파일만 메모리 캐시
-            50 * 1024 * 1024,            // 총 50MB 캐시 제한
-            Duration::from_secs(300),     // 5분 캐시 유지
-        )
+        Self::from_config(CacheConfig::default())
+    }
+
+    /// 전역 캐시 초기화 (한 번만 호출)
+    pub fn init_global(config: Option<CacheConfig>) -> Result<(), &'static str> {
+        let cache_config = config.unwrap_or_default();
+        let cache = Self::from_config(cache_config);
+
+        GLOBAL_CACHE.set(cache)
+            .map_err(|_| "Global cache already initialized")
+    }
+
+    /// 전역 캐시 인스턴스 반환
+    pub fn global() -> &'static ZeroCopyCache {
+        GLOBAL_CACHE.get_or_init(|| Self::default())
     }
 
     /// 파일을 로드 (캐시 사용 또는 직접 로드)

@@ -223,9 +223,9 @@ impl ComparativeBenchmark {
                 _ = shutdown_rx.recv() => break,
                 accept_result = server.accept() => {
                     match accept_result {
-                        Ok((stream, options, herd)) => {
+                        Ok(accept) => {
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_arena_benchmark_request(stream, options, herd).await {
+                                if let Err(e) = Self::handle_arena_benchmark_request(accept).await {
                                     eprintln!("Arena 요청 처리 오류: {}", e);
                                 }
                             });
@@ -254,9 +254,9 @@ impl ComparativeBenchmark {
                 _ = shutdown_rx.recv() => break,
                 accept_result = server.accept() => {
                     match accept_result {
-                        Ok((stream, options, _herd)) => {
+                        Ok(accept) => {
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_standard_benchmark_request(stream, options).await {
+                                if let Err(e) = Self::handle_standard_benchmark_request(accept).await {
                                     eprintln!("표준 요청 처리 오류: {}", e);
                                 }
                             });
@@ -272,12 +272,8 @@ impl ComparativeBenchmark {
 
     // Arena 벤치마크 요청 처리
     #[cfg(feature = "arena")]
-    async fn handle_arena_benchmark_request(
-        stream: tokio::net::TcpStream,
-        options: Options,
-        herd: std::sync::Arc<bumpalo_herd::Herd>,
-    ) -> Result<(), SendableError> {
-        match Server::parse_request_arena_writer(stream, options, herd).await {
+    async fn handle_arena_benchmark_request(accept: Accept) -> Result<(), SendableError> {
+        match accept.parse_request_arena_writer().await {
             Ok((request, mut response)) => {
                 let method = request.method().clone();
                 let path = request.uri().path().to_string();
@@ -419,11 +415,8 @@ impl ComparativeBenchmark {
     }
 
     // 표준 벤치마크 요청 처리
-    async fn handle_standard_benchmark_request(
-        stream: tokio::net::TcpStream,
-        options: Options,
-    ) -> Result<(), SendableError> {
-        match Server::parse_request(stream, options).await {
+    async fn handle_standard_benchmark_request(accept: Accept) -> Result<(), SendableError> {
+        match accept.parse_request().await {
             Ok((mut request, mut response)) => {
                 let method = request.method().clone();
                 let path = request.uri().path().to_string();

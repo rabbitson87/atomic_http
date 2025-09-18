@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.2
+
+* Add Accept struct for Server::accept, remove duplicate code.
+
 ## 0.6.1
 
 * Add zero_copy module and zero_copy module to be default.

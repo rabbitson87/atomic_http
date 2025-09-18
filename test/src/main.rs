@@ -1,5 +1,5 @@
 use atomic_http::{
-    external::dotenv::dotenv, ArenaBody, ResponseUtil, SendableError, Server, Writer,
+    external::dotenv::dotenv, ArenaBody, ArenaWriter, ResponseUtilArena, SendableError, Server,
 };
 use http::{Request, Response};
 use tokio::fs::try_exists;
@@ -13,17 +13,16 @@ async fn main() {
     println!("start server on: {}", address);
     loop {
         match server.accept().await {
-            Ok((tcpstream, options, herd)) => tokio::spawn(async move {
-                let ip = options.get_request_ip();
+            Ok(accept) => tokio::spawn(async move {
+                let ip = accept.option.get_request_ip();
                 println!("ip: {:?}", ip);
-                let (request, response) =
-                    match Server::parse_request_arena(tcpstream, options, herd).await {
-                        Ok(data) => data,
-                        Err(e) => {
-                            println!("failed to parse request: {e:?}");
-                            return;
-                        }
-                    };
+                let (request, response) = match accept.parse_request_arena_writer().await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        println!("failed to parse request: {e:?}");
+                        return;
+                    }
+                };
                 www_service(request, response).await.unwrap_or_else(|e| {
                     println!("an error occured; error = {:?}", e);
                 });
@@ -38,7 +37,7 @@ async fn main() {
 
 async fn www_service(
     request: Request<ArenaBody>,
-    mut response: Response<Writer>,
+    mut response: Response<ArenaWriter>,
 ) -> Result<(), SendableError> {
     println!("ip: {:?}", request.body().ip);
     println!(
@@ -69,6 +68,6 @@ async fn www_service(
         }
     }
 
-    response.responser().await?;
+    response.responser_arena().await?;
     Ok(())
 }

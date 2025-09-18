@@ -8,10 +8,10 @@ async fn run_arena_server(port: u16) -> Result<(), SendableError> {
     let mut server = Server::new(&format!("127.0.0.1:{}", port)).await?;
 
     loop {
-        let (stream, options, herd) = server.accept().await?;
+        let accept = server.accept().await?;
 
         tokio::spawn(async move {
-            match Server::parse_request_arena_writer(stream, options, herd).await {
+            match accept.parse_request_arena_writer().await {
                 Ok((request, mut response)) => {
                     match request.get_json_arena::<TestData>() {
                         Ok(data) => {
