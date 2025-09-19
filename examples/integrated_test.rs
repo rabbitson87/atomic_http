@@ -3,7 +3,6 @@ use clap::{Arg, Command};
 use http::StatusCode;
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -216,9 +215,9 @@ impl IntegratedTestManager {
                 // 연결 처리
                 accept_result = server.accept() => {
                     match accept_result {
-                        Ok((stream, options)) => {
+                        Ok(accept) => {
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_standard_request(stream, options).await {
+                                if let Err(e) = Self::handle_standard_request(accept).await {
                                     eprintln!("요청 처리 오류: {}", e);
                                 }
                             });
@@ -238,6 +237,7 @@ impl IntegratedTestManager {
     // Arena 요청 처리
     #[cfg(feature = "arena")]
     async fn handle_arena_request(accept: Accept) -> Result<(), SendableError> {
+        use std::path::Path;
         match accept.parse_request_arena_writer().await {
             Ok((request, mut response)) => {
                 let path = request.uri().path();
@@ -328,11 +328,8 @@ impl IntegratedTestManager {
 
     // 표준 요청 처리
     #[cfg(not(feature = "arena"))]
-    async fn handle_standard_request(
-        stream: tokio::net::TcpStream,
-        options: Options,
-    ) -> Result<(), SendableError> {
-        match Server::parse_request(stream, options).await {
+    async fn handle_standard_request(accept: Accept) -> Result<(), SendableError> {
+        match accept.parse_request().await {
             Ok((mut request, mut response)) => {
                 let path = request.uri().path();
 

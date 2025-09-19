@@ -80,9 +80,9 @@ async fn run_debug_server(port: u16, server_ready: Arc<Notify>) -> Result<(), Se
 
         loop {
             match server.accept().await {
-                Ok((stream, options)) => {
+                Ok(accpet) => {
                     tokio::spawn(async move {
-                        match Server::parse_request(stream, options).await {
+                        match accpet.parse_request().await {
                             Ok((request, mut response)) => {
                                 let method = request.method().clone();
                                 let path = request.uri().path().to_string();

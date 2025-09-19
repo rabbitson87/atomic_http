@@ -7,6 +7,7 @@ use std::str::FromStr;
 #[cfg(feature = "arena")]
 use bumpalo_herd::{Herd, Member};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "arena")]
 use std::sync::Arc;
 
 pub mod helpers;
@@ -55,17 +56,13 @@ macro_rules! dev_print {
     };
 }
 
-#[cfg(not(feature = "tokio_rustls"))]
 use tokio::net::TcpListener;
 
 use tokio::net::TcpStream;
-#[cfg(feature = "tokio_rustls")]
-use tokio_rustls::server::TlsStream;
 
 pub type SendableError = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct Server {
-    #[cfg(not(feature = "tokio_rustls"))]
     pub listener: TcpListener,
     pub options: Options,
     #[cfg(feature = "arena")]
@@ -174,7 +171,6 @@ impl Server {
         dev_print!("✅ Server initialized with Arena support");
 
         Ok(Server {
-            #[cfg(not(feature = "tokio_rustls"))]
             listener: TcpListener::bind(address).await?,
             options: Options::new(),
             #[cfg(feature = "arena")]
@@ -182,7 +178,6 @@ impl Server {
         })
     }
 
-    #[cfg(not(feature = "tokio_rustls"))]
     pub async fn accept(&mut self) -> Result<Accept, SendableError> {
         use std::time::Duration;
 
@@ -223,12 +218,7 @@ impl Server {
 }
 
 pub struct Accept {
-    #[cfg(not(feature = "tokio_rustls"))]
     pub tcp_stream: TcpStream,
-
-    #[cfg(feature = "tokio_rustls")]
-    pub tcp_stream: TlsStream<TcpStream>,
-
     pub option: Options,
 
     #[cfg(feature = "arena")]

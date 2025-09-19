@@ -24,18 +24,22 @@ pub struct BenchmarkResult {
 
 // 비교 벤치마크 매니저
 pub struct ComparativeBenchmark {
+    #[cfg(feature = "arena")]
     arena_port: u16,
     standard_port: u16,
+    #[cfg(feature = "arena")]
     arena_ready: Arc<Notify>,
     standard_ready: Arc<Notify>,
     results: Vec<BenchmarkResult>,
 }
 
 impl ComparativeBenchmark {
-    pub fn new(arena_port: u16, standard_port: u16) -> Self {
+    pub fn new(#[cfg(feature = "arena")] arena_port: u16, standard_port: u16) -> Self {
         Self {
+            #[cfg(feature = "arena")]
             arena_port,
             standard_port,
+            #[cfg(feature = "arena")]
             arena_ready: Arc::new(Notify::new()),
             standard_ready: Arc::new(Notify::new()),
             results: Vec::new(),
@@ -63,6 +67,7 @@ impl ComparativeBenchmark {
     async fn start_servers(&self) -> Result<(), SendableError> {
         println!("🚀 서버 시작 중...");
 
+        #[cfg(feature = "arena")]
         let (_arena_shutdown_tx, arena_shutdown_rx) = broadcast::channel(1);
         let (_standard_shutdown_tx, standard_shutdown_rx) = broadcast::channel(1);
 
@@ -995,6 +1000,7 @@ async fn main() -> Result<(), SendableError> {
         )
         .get_matches();
 
+    #[cfg(feature = "arena")]
     let arena_port: u16 = matches.get_one::<String>("arena_port").unwrap().parse()?;
     let standard_port: u16 = matches
         .get_one::<String>("standard_port")
@@ -1002,6 +1008,7 @@ async fn main() -> Result<(), SendableError> {
         .parse()?;
 
     println!("🚀 HTTP 서버 성능 비교 벤치마크");
+    #[cfg(feature = "arena")]
     println!("Arena 서버 포트: {}", arena_port);
     println!("표준 서버 포트: {}", standard_port);
 
@@ -1011,7 +1018,11 @@ async fn main() -> Result<(), SendableError> {
     #[cfg(not(feature = "arena"))]
     println!("📝 표준 모드로 실행");
 
-    let mut benchmark = ComparativeBenchmark::new(arena_port, standard_port);
+    let mut benchmark = ComparativeBenchmark::new(
+        #[cfg(feature = "arena")]
+        arena_port,
+        standard_port,
+    );
     benchmark.run_comparative_benchmark().await?;
 
     Ok(())

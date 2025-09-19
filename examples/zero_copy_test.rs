@@ -66,7 +66,7 @@ async fn run_zero_copy_server(port: u16) -> Result<(), SendableError> {
         tokio::spawn(async move {
             let req_num = req_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-            match Server::parse_request_arena_writeraccept.await {
+            match accept.parse_request_arena_writer().await {
                 Ok((request, mut response)) => {
                     let start_time = Instant::now();
                     let path = request.uri().path();
@@ -276,8 +276,12 @@ async fn run_zero_copy_server(port: u16) -> Result<(), SendableError> {
 }
 
 // 표준 서버 (비교용)
-#[cfg(not(all(feature = "arena")))]
+#[cfg(not(feature = "arena"))]
 async fn run_standard_server(port: u16) -> Result<(), SendableError> {
+    use http::StatusCode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     println!("🚀 표준 HTTP 서버 시작 (포트: {})", port);
     let mut server = Server::new(&format!("127.0.0.1:{}", port)).await?;
     println!("✅ 표준 서버 실행 중");
@@ -285,13 +289,13 @@ async fn run_standard_server(port: u16) -> Result<(), SendableError> {
     let request_count = Arc::new(AtomicUsize::new(0));
 
     loop {
-        let (stream, options) = server.accept().await?;
+        let accept = server.accept().await?;
         let req_count = request_count.clone();
 
         tokio::spawn(async move {
             let req_num = req_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-            match Server::parse_request(stream, options).await {
+            match accept.parse_request().await {
                 Ok((mut request, mut response)) => {
                     let start_time = Instant::now();
                     let path = request.uri().path();

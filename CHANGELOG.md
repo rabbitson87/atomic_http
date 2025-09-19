@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.3
+
+* Remove unuse tls options.
+
 ## 0.6.2
 
 * Add Accept struct for Server::accept, remove duplicate code.

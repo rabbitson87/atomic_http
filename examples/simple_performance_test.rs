@@ -38,11 +38,9 @@ async fn run_simple_server() -> u16 {
         ready_clone.notify_one();
 
         loop {
-            if let Ok((stream, options)) = server.accept().await {
+            if let Ok(accept) = server.accept().await {
                 tokio::spawn(async move {
-                    if let Ok((mut request, mut response)) =
-                        Server::parse_request(stream, options).await
-                    {
+                    if let Ok((mut request, mut response)) = accept.parse_request().await {
                         if let Ok(data) = request.get_json::<TestData>() {
                             let result = serde_json::json!({
                                 "status": "success",

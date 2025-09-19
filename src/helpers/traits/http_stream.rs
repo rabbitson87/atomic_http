@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use bumpalo_herd::Herd;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
+#[cfg(feature = "tokio_rustls")]
+use tokio_rustls::server::TlsStream;
 #[cfg(feature = "arena")]
 use std::sync::Arc;
 use std::time::Duration;
@@ -324,6 +326,24 @@ impl StreamHttp for TcpStream {
     }
 }
 
+#[cfg(feature = "tokio_rustls")]
+#[async_trait]
+impl StreamHttp for TlsStream<TcpStream> {
+    async fn parse_request(
+        self,
+        options: &Options,
+    ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
+        let stream = self.into_inner().0;
+        stream.set_nodelay(options.no_delay)?;
+
+        let (bytes, stream) = get_bytes_from_reader(stream, options).await?;
+
+        let request = get_request(bytes).await?;
+
+        Ok(get_parse_result_from_request(request, stream, options)?)
+    }
+}
+
 fn get_parse_result_from_request(
     mut request: Request<Body>,
     stream: TcpStream,
@@ -469,6 +489,7 @@ async fn get_bytes_from_reader(
     Ok((final_buffer, stream))
 }
 
+#[cfg(feature = "arena")]
 fn determine_next_read_size(current_size: usize) -> usize {
     match current_size {
         0..=512 => 1024,      // 작은 헤더: 1KB 단위

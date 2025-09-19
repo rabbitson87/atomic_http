@@ -42,10 +42,10 @@ async fn run_standard_server(port: u16) -> Result<(), SendableError> {
     let mut server = Server::new(&format!("127.0.0.1:{}", port)).await?;
 
     loop {
-        let (stream, options) = server.accept().await?;
+        let accept = server.accept().await?;
 
         tokio::spawn(async move {
-            match Server::parse_request(stream, options).await {
+            match accept.parse_request().await {
                 Ok((mut request, mut response)) => {
                     match request.get_json::<TestData>() {
                         Ok(data) => {
