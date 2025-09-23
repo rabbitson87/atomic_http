@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.0
+
+* Add SIMD head parser.
+
 ## 0.6.3
 
 * Remove unuse tls options.

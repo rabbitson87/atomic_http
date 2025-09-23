@@ -83,7 +83,7 @@ impl ZeroCopyFile {
     }
 
     /// 라인별 순회 이터레이터 (제로카피)
-    pub fn lines(&self) -> LineIterator {
+    pub fn lines(&self) -> LineIterator<'_> {
         LineIterator {
             data: &self.mmap,
             pos: 0,
