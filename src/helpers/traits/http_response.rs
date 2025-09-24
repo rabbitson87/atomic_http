@@ -216,14 +216,30 @@ impl ResponseUtil for Response<Writer> {
         send_string.push_str(&format!("content-length: {}\r\n", content_length));
         send_string.push_str("\r\n");
 
-        // mutable borrow 문제 해결: body_mut()을 한 번만 호출하고 재사용
         let body = self.body_mut();
 
-        // 헤더 전송
-        body.stream.send_bytes(send_string.as_bytes()).await?;
+        #[cfg(feature = "vectored_io")]
+        {
+            // Vectored I/O로 헤더와 파일 데이터를 한 번에 전송
+            use std::io::IoSlice;
+            let header_slice = IoSlice::new(send_string.as_bytes());
+            let file_slice = IoSlice::new(file_data);
+            let bufs = [header_slice, file_slice];
 
-        // 파일 데이터 전송 (제로카피 또는 캐시된 데이터)
-        body.stream.send_bytes(file_data).await?;
+            body.stream.send_vectored(&bufs).await?;
+            crate::dev_print!(
+                "Vectored I/O: sent header+file in single syscall ({} + {} bytes)",
+                send_string.len(),
+                content_length
+            );
+        }
+
+        #[cfg(not(feature = "vectored_io"))]
+        {
+            // 기존 방식: 별도 전송
+            body.stream.send_bytes(send_string.as_bytes()).await?;
+            body.stream.send_bytes(file_data).await?;
+        }
 
         crate::dev_print!(
             "Zero-copy file sent successfully: {} bytes ({})",
@@ -347,14 +363,33 @@ impl ResponseUtilArena for Response<ArenaWriter> {
                 // mutable borrow 문제 해결: body_mut()을 한 번만 호출
                 let body = self.body_mut();
 
-                // 헤더 전송
-                body.stream.send_bytes(send_string.as_bytes()).await?;
-
                 // Arena 데이터 직접 전송 (제로카피)
                 let response_data = unsafe {
                     std::slice::from_raw_parts(body.response_data_ptr, body.response_data_len)
                 };
-                body.stream.send_bytes(response_data).await?;
+
+                #[cfg(feature = "vectored_io")]
+                {
+                    // Vectored I/O로 헤더와 응답 데이터를 한 번에 전송
+                    use std::io::IoSlice;
+                    let header_slice = IoSlice::new(send_string.as_bytes());
+                    let data_slice = IoSlice::new(response_data);
+                    let bufs = [header_slice, data_slice];
+
+                    body.stream.send_vectored(&bufs).await?;
+                    crate::dev_print!(
+                        "Arena Vectored I/O: sent header+data in single syscall ({} + {} bytes)",
+                        send_string.len(),
+                        response_data.len()
+                    );
+                }
+
+                #[cfg(not(feature = "vectored_io"))]
+                {
+                    // 기존 방식: 별도 전송
+                    body.stream.send_bytes(send_string.as_bytes()).await?;
+                    body.stream.send_bytes(response_data).await?;
+                }
             } else {
                 // 빈 응답
                 for (key, value) in self.headers().iter() {
@@ -434,11 +469,28 @@ impl ResponseUtilArena for Response<ArenaWriter> {
         // mutable borrow 문제 해결: body_mut()을 한 번만 호출
         let body = self.body_mut();
 
-        // 헤더 전송
-        body.stream.send_bytes(send_string.as_bytes()).await?;
+        #[cfg(feature = "vectored_io")]
+        {
+            // Vectored I/O로 헤더와 파일 데이터를 한 번에 전송
+            use std::io::IoSlice;
+            let header_slice = IoSlice::new(send_string.as_bytes());
+            let file_slice = IoSlice::new(file_data);
+            let bufs = [header_slice, file_slice];
 
-        // 파일 데이터 전송 (제로카피!)
-        body.stream.send_bytes(file_data).await?;
+            body.stream.send_vectored(&bufs).await?;
+            crate::dev_print!(
+                "Arena Vectored I/O: sent header+file in single syscall ({} + {} bytes)",
+                send_string.len(),
+                content_length
+            );
+        }
+
+        #[cfg(not(feature = "vectored_io"))]
+        {
+            // 기존 방식: 별도 전송
+            body.stream.send_bytes(send_string.as_bytes()).await?;
+            body.stream.send_bytes(file_data).await?;
+        }
 
         crate::dev_print!(
             "Arena + Zero-copy file sent: {} bytes ({})",
@@ -452,12 +504,32 @@ impl ResponseUtilArena for Response<ArenaWriter> {
 #[async_trait]
 pub trait SendBytes {
     async fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), SendableError>;
+
+    #[cfg(feature = "vectored_io")]
+    async fn send_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), SendableError>;
 }
 
 #[async_trait]
 impl SendBytes for tokio::net::TcpStream {
     async fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), SendableError> {
-        self.write_all(bytes).await?;
+        #[cfg(feature = "vectored_io")]
+        {
+            use tokio::io::AsyncWriteExt;
+            self.write_vectored(&[std::io::IoSlice::new(bytes)]).await?;
+        }
+
+        #[cfg(not(feature = "vectored_io"))]
+        {
+            use tokio::io::AsyncWriteExt;
+            self.write_all(bytes).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "vectored_io")]
+    async fn send_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), SendableError> {
+        use tokio::io::AsyncWriteExt;
+        self.write_vectored(bufs).await?;
         Ok(())
     }
 }

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.1
+
+* Add vectored_io for stream write.
+
 ## 0.7.0
 
 * Add SIMD head parser.
