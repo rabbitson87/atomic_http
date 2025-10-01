@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 pub mod helpers;
 
+#[cfg(feature = "connection_pool")]
+pub mod connection_pool;
+
 pub use helpers::traits::http_request::RequestUtils;
 #[cfg(feature = "arena")]
 pub use helpers::traits::http_request::RequestUtilsArena;
@@ -27,6 +30,9 @@ pub use helpers::traits::zero_copy::{
     parse_json_file, CacheConfig, CacheStats, CachedFileData, FileLoadResult, ZeroCopyCache,
     ZeroCopyFile,
 };
+
+#[cfg(feature = "connection_pool")]
+pub use connection_pool::{ConnectionPool, ConnectionPoolConfig, ConnectionStats};
 
 pub mod external {
     pub use async_trait;
@@ -67,6 +73,8 @@ pub struct Server {
     pub options: Options,
     #[cfg(feature = "arena")]
     pub herd: Arc<Herd>,
+    #[cfg(feature = "connection_pool")]
+    pub connection_pool: Option<Arc<tokio::sync::Mutex<ConnectionPool>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +88,10 @@ pub struct Options {
     pub current_client_addr: Option<SocketAddr>,
     pub zero_copy_threshold: usize,
     pub enable_file_cache: bool,
+
+    // Connection pooling configuration
+    #[cfg(feature = "connection_pool")]
+    pub connection_option: ConnectionPoolConfig,
 }
 
 impl Options {
@@ -94,6 +106,10 @@ impl Options {
             current_client_addr: None,
             zero_copy_threshold: 1024 * 1024, // 1MB 이상 파일에 제로카피 적용
             enable_file_cache: true,
+
+            // Connection pooling enabled by default with nginx-like settings
+            #[cfg(feature = "connection_pool")]
+            connection_option: ConnectionPoolConfig::new(),
         };
 
         #[cfg(feature = "env")]
@@ -145,6 +161,40 @@ impl Options {
                     _options.enable_file_cache = data;
                 }
             }
+
+            // Connection pooling environment variables
+            #[cfg(feature = "connection_pool")]
+            {
+                let mut needs_config = false;
+
+                let enable_keep_alive = if let Ok(data) = env::var("ENABLE_KEEP_ALIVE") {
+                    needs_config = true;
+                    data.parse::<bool>().unwrap_or(true)
+                } else {
+                    true
+                };
+
+                let keep_alive_timeout = if let Ok(data) = env::var("KEEP_ALIVE_TIMEOUT") {
+                    needs_config = true;
+                    data.parse::<u64>().unwrap_or(75)
+                } else {
+                    75
+                };
+
+                let max_connections = if let Ok(data) = env::var("MAX_IDLE_CONNECTIONS_PER_HOST") {
+                    needs_config = true;
+                    data.parse::<usize>().unwrap_or(32)
+                } else {
+                    32
+                };
+
+                if needs_config {
+                    _options.connection_option = ConnectionPoolConfig::new()
+                        .keep_alive(enable_keep_alive)
+                        .idle_timeout(keep_alive_timeout)
+                        .max_connections_per_host(max_connections);
+                }
+            }
         }
 
         _options
@@ -164,18 +214,155 @@ impl Options {
     pub fn enable_zero_copy_cache(&mut self, enable: bool) {
         self.enable_file_cache = enable;
     }
+
+    // Connection pooling configuration methods
+    #[cfg(feature = "connection_pool")]
+    pub fn set_connection_option(&mut self, config: ConnectionPoolConfig) {
+        self.connection_option = config;
+    }
+
+    #[cfg(feature = "connection_pool")]
+    pub fn get_connection_option(&self) -> &ConnectionPoolConfig {
+        &self.connection_option
+    }
+
+    #[cfg(feature = "connection_pool")]
+    pub fn get_connection_option_mut(&mut self) -> &mut ConnectionPoolConfig {
+        &mut self.connection_option
+    }
+
+    #[cfg(feature = "connection_pool")]
+    pub fn is_connection_pool_enabled(&self) -> bool {
+        self.connection_option.enable_keep_alive
+    }
+
+    #[cfg(feature = "connection_pool")]
+    pub fn enable_connection_pool(&mut self) {
+        self.connection_option.enable_keep_alive = true;
+    }
+
+    #[cfg(feature = "connection_pool")]
+    pub fn disable_connection_pool(&mut self) {
+        self.connection_option.enable_keep_alive = false;
+    }
 }
 
 impl Server {
     pub async fn new(address: &str) -> Result<Server, SendableError> {
         dev_print!("✅ Server initialized with Arena support");
 
-        Ok(Server {
+        let mut server = Server {
             listener: TcpListener::bind(address).await?,
             options: Options::new(),
             #[cfg(feature = "arena")]
             herd: Arc::new(Herd::new()),
-        })
+            #[cfg(feature = "connection_pool")]
+            connection_pool: None,
+        };
+
+        // Auto-enable connection pool if enabled in default options
+        #[cfg(feature = "connection_pool")]
+        if server.options.is_connection_pool_enabled() {
+            if let Err(e) = server.enable_connection_pool() {
+                dev_print!("⚠️  Failed to enable connection pool: {}", e);
+            }
+        }
+
+        Ok(server)
+    }
+
+    /// Create server with custom options (including connection pool configuration)
+    pub async fn with_options(address: &str, options: Options) -> Result<Server, SendableError> {
+        dev_print!("✅ Server initialized with custom options");
+
+        let mut server = Server {
+            listener: TcpListener::bind(address).await?,
+            options,
+            #[cfg(feature = "arena")]
+            herd: Arc::new(Herd::new()),
+            #[cfg(feature = "connection_pool")]
+            connection_pool: None,
+        };
+
+        // Auto-enable connection pool if enabled in options
+        #[cfg(feature = "connection_pool")]
+        if server.options.is_connection_pool_enabled() {
+            if let Err(e) = server.enable_connection_pool() {
+                dev_print!("⚠️  Failed to enable connection pool: {}", e);
+            }
+        }
+
+        Ok(server)
+    }
+
+    /// Create server with connection pool configuration (legacy method)
+    #[cfg(feature = "connection_pool")]
+    pub async fn with_connection_pool(
+        address: &str,
+        pool_config: Option<ConnectionPoolConfig>,
+    ) -> Result<Server, SendableError> {
+        let mut options = Options::new();
+        if let Some(config) = pool_config {
+            options.set_connection_option(config);
+        } else {
+            options.disable_connection_pool();
+        }
+        Self::with_options(address, options).await
+    }
+
+    /// Enable connection pooling with configuration from options
+    #[cfg(feature = "connection_pool")]
+    pub fn enable_connection_pool(&mut self) -> Result<(), SendableError> {
+        if self.options.is_connection_pool_enabled() {
+            let mut pool = ConnectionPool::new(self.options.connection_option.clone());
+            pool.start_cleanup_task();
+            self.connection_pool = Some(Arc::new(tokio::sync::Mutex::new(pool)));
+            dev_print!("✅ Connection pool enabled for server");
+            Ok(())
+        } else {
+            dev_print!("❌ Connection pool is disabled in options");
+            Err("Connection pool is disabled".into())
+        }
+    }
+
+    /// Disable connection pooling
+    #[cfg(feature = "connection_pool")]
+    pub async fn disable_connection_pool(&mut self) {
+        if let Some(pool_arc) = self.connection_pool.take() {
+            let mut pool = pool_arc.lock().await;
+            pool.shutdown().await;
+        }
+        dev_print!("🔴 Connection pool disabled for server");
+    }
+
+    /// Get connection pool statistics
+    #[cfg(feature = "connection_pool")]
+    pub async fn get_connection_pool_stats(&self) -> Option<ConnectionStats> {
+        if let Some(pool_arc) = &self.connection_pool {
+            let pool = pool_arc.lock().await;
+            Some(pool.stats())
+        } else {
+            None
+        }
+    }
+
+    /// Print connection pool statistics
+    #[cfg(feature = "connection_pool")]
+    pub async fn print_connection_pool_stats(&self) {
+        if let Some(stats) = self.get_connection_pool_stats().await {
+            println!("🌐 {}", stats);
+        } else {
+            println!("🔴 Connection pool is disabled");
+        }
+    }
+
+    /// Clear connection pool
+    #[cfg(feature = "connection_pool")]
+    pub async fn clear_connection_pool(&self) {
+        if let Some(pool_arc) = &self.connection_pool {
+            let pool = pool_arc.lock().await;
+            pool.clear().await;
+        }
     }
 
     pub async fn accept(&mut self) -> Result<Accept, SendableError> {

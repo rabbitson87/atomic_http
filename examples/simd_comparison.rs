@@ -90,27 +90,41 @@ fn benchmark_comparison() {
         // 성능 계산
         let total_bytes = test_data.len() * ITERATIONS;
         let simd_throughput = (total_bytes as f64) / simd_duration.as_secs_f64() / 1024.0 / 1024.0;
-        let scalar_throughput = (total_bytes as f64) / scalar_duration.as_secs_f64() / 1024.0 / 1024.0;
+        let scalar_throughput =
+            (total_bytes as f64) / scalar_duration.as_secs_f64() / 1024.0 / 1024.0;
 
         let speedup = scalar_duration.as_nanos() as f64 / simd_duration.as_nanos() as f64;
 
         println!("   📈 SIMD 방식:");
         println!("     시간: {:?}", simd_duration);
         println!("     처리량: {:.2} MB/s", simd_throughput);
-        println!("     평균 처리시간: {:.2} ns/req", simd_duration.as_nanos() as f64 / ITERATIONS as f64);
+        println!(
+            "     평균 처리시간: {:.2} ns/req",
+            simd_duration.as_nanos() as f64 / ITERATIONS as f64
+        );
 
         println!("   📊 스칼라 방식:");
         println!("     시간: {:?}", scalar_duration);
         println!("     처리량: {:.2} MB/s", scalar_throughput);
-        println!("     평균 처리시간: {:.2} ns/req", scalar_duration.as_nanos() as f64 / ITERATIONS as f64);
+        println!(
+            "     평균 처리시간: {:.2} ns/req",
+            scalar_duration.as_nanos() as f64 / ITERATIONS as f64
+        );
 
         println!("   🏆 성능 개선:");
         if speedup > 1.0 {
-            println!("     SIMD가 {:.2}x 더 빠름 ({:.1}% 개선)", speedup, (speedup - 1.0) * 100.0);
+            println!(
+                "     SIMD가 {:.2}x 더 빠름 ({:.1}% 개선)",
+                speedup,
+                (speedup - 1.0) * 100.0
+            );
         } else {
             println!("     스칼라가 {:.2}x 더 빠름", 1.0 / speedup);
         }
-        println!("     처리량 개선: {:.1}%", ((simd_throughput / scalar_throughput) - 1.0) * 100.0);
+        println!(
+            "     처리량 개선: {:.1}%",
+            ((simd_throughput / scalar_throughput) - 1.0) * 100.0
+        );
     }
 
     println!("\n✅ 비교 벤치마크 완료!");
@@ -139,11 +153,23 @@ fn verify_correctness() {
         print!("테스트 케이스 {}: ", i + 1);
 
         if simd_header == scalar_header && simd_body == scalar_body {
-            println!("✅ 일치 (헤더: {}bytes, 바디: {}bytes)", simd_header.len(), simd_body.len());
+            println!(
+                "✅ 일치 (헤더: {}bytes, 바디: {}bytes)",
+                simd_header.len(),
+                simd_body.len()
+            );
         } else {
             println!("❌ 불일치!");
-            println!("   SIMD - 헤더: {}bytes, 바디: {}bytes", simd_header.len(), simd_body.len());
-            println!("   스칼라 - 헤더: {}bytes, 바디: {}bytes", scalar_header.len(), scalar_body.len());
+            println!(
+                "   SIMD - 헤더: {}bytes, 바디: {}bytes",
+                simd_header.len(),
+                simd_body.len()
+            );
+            println!(
+                "   스칼라 - 헤더: {}bytes, 바디: {}bytes",
+                scalar_header.len(),
+                scalar_body.len()
+            );
         }
     }
 }
@@ -192,8 +218,10 @@ fn benchmark_patterns() {
 
         let speedup = scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
 
-        println!("   SIMD: {:?} | 스칼라: {:?} | 개선: {:.2}x",
-                 simd_time, scalar_time, speedup);
+        println!(
+            "   SIMD: {:?} | 스칼라: {:?} | 개선: {:.2}x",
+            simd_time, scalar_time, speedup
+        );
     }
 }
 

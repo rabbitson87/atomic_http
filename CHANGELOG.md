@@ -1,5 +1,9 @@
 # Changes
 
+## 0.8.0
+
+* Add connection pool for request.
+
 ## 0.7.1
 
 * Add vectored_io for stream write.

@@ -68,6 +68,25 @@ impl ResponseUtil for Response<Writer> {
         let status_line = format!("{:?} {}\r\n", self.version(), self.status());
         send_string.push_str(&status_line);
 
+        #[cfg(feature = "connection_pool")]
+        {
+            use http::header::CONNECTION;
+            let options = &self.body().options;
+            let connection_config = &options.connection_option;
+
+            // Keep-alive 설정이 활성화된 경우에만 헤더 추가
+            if connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
+                send_string.push_str("Connection: keep-alive\r\n");
+                send_string.push_str(&format!(
+                    "Keep-Alive: timeout={}, max={}\r\n",
+                    connection_config.max_idle_time.as_secs(),
+                    connection_config.max_connections_per_host
+                ));
+            } else if !connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
+                send_string.push_str("Connection: close\r\n");
+            }
+        }
+
         if cfg!(feature = "response_file") && self.body().use_file {
             use tokio::{
                 fs,
@@ -276,6 +295,25 @@ impl ResponseUtilArena for Response<ArenaWriter> {
 
         let status_line = format!("{:?} {}\r\n", self.version(), self.status());
         send_string.push_str(&status_line);
+
+        #[cfg(feature = "connection_pool")]
+        {
+            use http::header::CONNECTION;
+            let options = &self.body().options;
+            let connection_config = &options.connection_option;
+
+            // Keep-alive 설정이 활성화된 경우에만 헤더 추가
+            if connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
+                send_string.push_str("Connection: keep-alive\r\n");
+                send_string.push_str(&format!(
+                    "Keep-Alive: timeout={}, max={}\r\n",
+                    connection_config.max_idle_time.as_secs(),
+                    connection_config.max_connections_per_host
+                ));
+            } else if !connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
+                send_string.push_str("Connection: close\r\n");
+            }
+        }
 
         if cfg!(feature = "response_file") && self.body().use_file {
             #[cfg(feature = "response_file")]

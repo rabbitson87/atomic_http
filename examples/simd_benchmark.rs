@@ -58,8 +58,10 @@ fn benchmark_simd_vs_scalar() {
         println!("   SIMD 방식:");
         println!("     시간: {:?}", simd_duration);
         println!("     처리량: {:.2} MB/s", simd_throughput);
-        println!("     평균 처리시간: {:.2} μs/req",
-                 simd_duration.as_nanos() as f64 / ITERATIONS as f64 / 1000.0);
+        println!(
+            "     평균 처리시간: {:.2} μs/req",
+            simd_duration.as_nanos() as f64 / ITERATIONS as f64 / 1000.0
+        );
     }
 
     println!("\n✅ 벤치마크 완료!");
@@ -81,8 +83,12 @@ fn verify_correctness() {
         let slice: &[u8] = test_data;
         let (header, body) = slice.split_header_body_arena();
 
-        println!("테스트 케이스 {}: 헤더 {}bytes, 바디 {}bytes",
-                 i + 1, header.len(), body.len());
+        println!(
+            "테스트 케이스 {}: 헤더 {}bytes, 바디 {}bytes",
+            i + 1,
+            header.len(),
+            body.len()
+        );
 
         // 헤더에 \r\n\r\n이 없는지 확인
         if header.windows(4).any(|w| w == b"\r\n\r\n") {

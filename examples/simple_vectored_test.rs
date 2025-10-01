@@ -90,7 +90,11 @@ async fn test_client(port: u16, num_requests: usize) -> Duration {
 
     let duration = start.elapsed();
     let rps = num_requests as f64 / duration.as_secs_f64();
-    println!("📊 성능: {:.2} req/s ({}ms total)", rps, duration.as_millis());
+    println!(
+        "📊 성능: {:.2} req/s ({}ms total)",
+        rps,
+        duration.as_millis()
+    );
 
     duration
 }
@@ -144,7 +148,9 @@ async fn main() {
     server_handle.abort();
 
     println!("\n✅ 테스트 완료!");
-    println!("📈 최종 결과: {}ms (평균 {:.2}ms/req)",
-             duration.as_millis(),
-             duration.as_millis() as f64 / num_requests as f64);
+    println!(
+        "📈 최종 결과: {}ms (평균 {:.2}ms/req)",
+        duration.as_millis(),
+        duration.as_millis() as f64 / num_requests as f64
+    );
 }
