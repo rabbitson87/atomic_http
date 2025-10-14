@@ -1,5 +1,9 @@
 # Changes
 
+## 0.8.1
+
+* Fixed for vectored_io in linux.
+
 ## 0.8.0
 
 * Add connection pool for request.

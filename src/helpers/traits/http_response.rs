@@ -550,15 +550,24 @@ pub trait SendBytes {
 #[async_trait]
 impl SendBytes for tokio::net::TcpStream {
     async fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), SendableError> {
+        use tokio::io::AsyncWriteExt;
+
         #[cfg(feature = "vectored_io")]
         {
-            use tokio::io::AsyncWriteExt;
-            self.write_vectored(&[std::io::IoSlice::new(bytes)]).await?;
+            // vectored_io 기능이 켜져 있을 때도 부분 쓰기 처리
+            let mut written = 0;
+            while written < bytes.len() {
+                let n = self.write_vectored(&[std::io::IoSlice::new(&bytes[written..])]).await?;
+                if n == 0 {
+                    return Err("Connection closed during write".into());
+                }
+                written += n;
+            }
         }
 
         #[cfg(not(feature = "vectored_io"))]
         {
-            use tokio::io::AsyncWriteExt;
+            // write_all은 이미 부분 쓰기를 처리함
             self.write_all(bytes).await?;
         }
         Ok(())
@@ -567,7 +576,49 @@ impl SendBytes for tokio::net::TcpStream {
     #[cfg(feature = "vectored_io")]
     async fn send_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), SendableError> {
         use tokio::io::AsyncWriteExt;
-        self.write_vectored(bufs).await?;
+
+        // 전체 데이터 크기 계산
+        let total_size: usize = bufs.iter().map(|b| b.len()).sum();
+        let mut written = 0;
+
+        // 부분 쓰기를 처리하기 위한 루프
+        while written < total_size {
+            // 현재 쓸 버퍼들의 오프셋 계산
+            let mut current_written = written;
+            let mut buf_idx = 0;
+
+            // written 바이트만큼 건너뛰기
+            while buf_idx < bufs.len() && current_written >= bufs[buf_idx].len() {
+                current_written -= bufs[buf_idx].len();
+                buf_idx += 1;
+            }
+
+            if buf_idx >= bufs.len() {
+                break; // 모두 전송됨
+            }
+
+            // 남은 버퍼들을 IoSlice로 재구성
+            let mut remaining_bufs: Vec<std::io::IoSlice> = Vec::with_capacity(bufs.len() - buf_idx);
+
+            // 첫 번째 버퍼는 오프셋을 적용
+            if current_written > 0 {
+                remaining_bufs.push(std::io::IoSlice::new(&bufs[buf_idx][current_written..]));
+                buf_idx += 1;
+            }
+
+            // 나머지 버퍼들 추가
+            for buf in &bufs[buf_idx..] {
+                remaining_bufs.push(std::io::IoSlice::new(buf));
+            }
+
+            // 쓰기 수행
+            let n = self.write_vectored(&remaining_bufs).await?;
+            if n == 0 {
+                return Err("Connection closed during vectored write".into());
+            }
+            written += n;
+        }
+
         Ok(())
     }
 }
