@@ -1,5 +1,9 @@
 # Changes
 
+## 0.9.0
+
+* Add unordered for connection pool.
+
 ## 0.8.1
 
 * Fixed for vectored_io in linux.

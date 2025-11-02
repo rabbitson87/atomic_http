@@ -1,6 +1,6 @@
 [package]
 name = "atomic_http"
-version = "0.8.1"
+version = "0.9.0"
 authors = ["hsng95@gmail.com"]
 description = "High level HTTP server library"
 homepage = "https://github.com/rabbitson87/atomic_http"
@@ -42,6 +42,7 @@ bumpalo = { version = "3.19.0", features = [
 ], optional = true }
 bumpalo-herd = { version = "0.1.2", optional = true }
 dashmap = "6.1.0"
+futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["html_reports", "async_tokio"] }
@@ -108,4 +109,4 @@ env = ["dep:dotenv"]
 arena = ["dep:bumpalo", "dep:bumpalo-herd"]
 simd = []
 vectored_io = []
-connection_pool = []
+connection_pool = ["dep:futures"]

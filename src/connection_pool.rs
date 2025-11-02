@@ -1,7 +1,8 @@
 use dashmap::DashMap;
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -320,38 +321,60 @@ impl ConnectionPool {
         );
     }
 
-    /// Cleanup expired connections
+    /// Cleanup expired connections (parallel version with FuturesUnordered)
+    ///
+    /// This method uses FuturesUnordered to clean up expired connections from
+    /// multiple hosts in parallel, significantly improving performance when
+    /// managing connections to many different hosts.
     async fn cleanup_expired_connections(
         pools: &Arc<DashMap<SocketAddr, Arc<Mutex<VecDeque<PooledConnection>>>>>,
         config: &ConnectionPoolConfig,
     ) {
-        let mut total_cleaned = 0;
+        let total_cleaned = Arc::new(AtomicUsize::new(0));
+        let pools_clone = pools.clone();
+
+        // Collect all cleanup tasks into FuturesUnordered for parallel execution
+        let mut tasks = FuturesUnordered::new();
 
         for entry in pools.iter() {
             let addr = *entry.key();
             let pool = entry.value().clone();
-            let mut pool_guard = pool.lock().await;
+            let max_idle_time = config.max_idle_time;
+            let max_lifetime = config.max_lifetime;
+            let total_cleaned = Arc::clone(&total_cleaned);
+            let pools_ref = pools_clone.clone();
 
-            let initial_size = pool_guard.len();
-            pool_guard.retain(|conn| !conn.is_expired(config.max_idle_time, config.max_lifetime));
+            // Each host's cleanup runs in parallel
+            tasks.push(async move {
+                let mut pool_guard = pool.lock().await;
 
-            let cleaned = initial_size - pool_guard.len();
-            if cleaned > 0 {
-                total_cleaned += cleaned;
-                dev_print!("Cleaned {} expired connections for {}", cleaned, addr);
-            }
+                let initial_size = pool_guard.len();
+                pool_guard.retain(|conn| !conn.is_expired(max_idle_time, max_lifetime));
 
-            // Remove empty pools
-            if pool_guard.is_empty() {
+                let cleaned = initial_size - pool_guard.len();
+                if cleaned > 0 {
+                    total_cleaned.fetch_add(cleaned, Ordering::Relaxed);
+                    dev_print!("Cleaned {} expired connections for {}", cleaned, addr);
+                }
+
+                // Remove empty pools
+                let should_remove = pool_guard.is_empty();
                 drop(pool_guard);
-                pools.remove(&addr);
-            }
+
+                if should_remove {
+                    pools_ref.remove(&addr);
+                }
+            });
         }
 
-        if total_cleaned > 0 {
+        // Execute all tasks in parallel and wait for completion
+        while tasks.next().await.is_some() {}
+
+        let total = total_cleaned.load(Ordering::Relaxed);
+        if total > 0 {
             dev_print!(
-                "Connection pool cleanup: removed {} expired connections",
-                total_cleaned
+                "Connection pool cleanup (parallel): removed {} expired connections",
+                total
             );
         }
     }
