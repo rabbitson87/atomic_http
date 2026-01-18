@@ -29,8 +29,7 @@ fn bench_standard_parsing(c: &mut Criterion) {
 // 아레나 파싱 벤치마크 (arena 피쳐 포함)
 #[cfg(feature = "arena")]
 fn bench_arena_parsing(c: &mut Criterion) {
-    use bumpalo_herd::Herd;
-    use std::sync::Arc;
+    use bumpalo::Bump;
 
     let mut group = c.benchmark_group("arena_parsing");
 
@@ -43,11 +42,10 @@ fn bench_arena_parsing(c: &mut Criterion) {
             size,
             |b, _| {
                 b.iter(|| {
-                    let herd = Arc::new(Herd::new());
-                    let member = herd.get();
+                    let bump = Bump::new();
 
                     // 아레나에 할당
-                    let allocated_data = member.alloc_slice_copy(&json_bytes);
+                    let allocated_data = bump.alloc_slice_copy(&json_bytes);
 
                     // 직접 바이트에서 파싱 (제로카피)
                     let _parsed: TestData = serde_json::from_slice(allocated_data).unwrap();
@@ -57,9 +55,8 @@ fn bench_arena_parsing(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("arena_allocation", size), size, |b, _| {
             b.iter(|| {
-                let herd = Arc::new(Herd::new());
-                let member = herd.get();
-                black_box(member.alloc_slice_copy(&json_bytes));
+                let bump = Bump::new();
+                black_box(bump.alloc_slice_copy(&json_bytes));
             })
         });
     }
@@ -89,12 +86,10 @@ fn bench_memory_allocation(c: &mut Criterion) {
         #[cfg(feature = "arena")]
         group.bench_with_input(BenchmarkId::new("arena_allocation", size), size, |b, _| {
             b.iter(|| {
-                use bumpalo_herd::Herd;
-                use std::sync::Arc;
+                use bumpalo::Bump;
 
-                let herd = Arc::new(Herd::new());
-                let member = herd.get();
-                black_box(member.alloc_slice_copy(&test_data));
+                let bump = Bump::new();
+                black_box(bump.alloc_slice_copy(&test_data));
             })
         });
     }

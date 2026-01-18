@@ -1,5 +1,9 @@
 # Changes
 
+## 0.9.1
+
+* Fixed for arena feature.
+
 ## 0.9.0
 
 * Add unordered for connection pool.

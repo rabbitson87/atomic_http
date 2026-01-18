@@ -5,9 +5,9 @@ use std::{env::current_dir, io, net::SocketAddr, path::PathBuf};
 use std::str::FromStr;
 
 #[cfg(feature = "arena")]
-use bumpalo_herd::{Herd, Member};
+use bumpalo::Bump;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "arena")]
+#[cfg(feature = "connection_pool")]
 use std::sync::Arc;
 
 pub mod helpers;
@@ -45,8 +45,6 @@ pub mod external {
 
     #[cfg(feature = "arena")]
     pub use bumpalo;
-    #[cfg(feature = "arena")]
-    pub use bumpalo_herd;
 
     pub use memmap2;
 }
@@ -71,8 +69,6 @@ pub type SendableError = Box<dyn std::error::Error + Send + Sync>;
 pub struct Server {
     pub listener: TcpListener,
     pub options: Options,
-    #[cfg(feature = "arena")]
-    pub herd: Arc<Herd>,
     #[cfg(feature = "connection_pool")]
     pub connection_pool: Option<Arc<tokio::sync::Mutex<ConnectionPool>>>,
 }
@@ -254,8 +250,6 @@ impl Server {
         let mut server = Server {
             listener: TcpListener::bind(address).await?,
             options: Options::new(),
-            #[cfg(feature = "arena")]
-            herd: Arc::new(Herd::new()),
             #[cfg(feature = "connection_pool")]
             connection_pool: None,
         };
@@ -278,8 +272,6 @@ impl Server {
         let mut server = Server {
             listener: TcpListener::bind(address).await?,
             options,
-            #[cfg(feature = "arena")]
-            herd: Arc::new(Herd::new()),
             #[cfg(feature = "connection_pool")]
             connection_pool: None,
         };
@@ -380,21 +372,11 @@ impl Server {
             }
         };
         self.options.current_client_addr = Some(addr);
-        Ok(Accept::new(
-            stream,
-            self.options.clone(),
-            #[cfg(feature = "arena")]
-            self.herd.clone(),
-        ))
+        Ok(Accept::new(stream, self.options.clone()))
     }
 
     pub fn set_no_delay(&mut self, no_delay: bool) {
         self.options.no_delay = no_delay;
-    }
-
-    #[cfg(feature = "arena")]
-    pub fn get_herd(&self) -> &Arc<Herd> {
-        &self.herd
     }
 
     /// 캐시 통계 출력
@@ -407,23 +389,11 @@ impl Server {
 pub struct Accept {
     pub tcp_stream: TcpStream,
     pub option: Options,
-
-    #[cfg(feature = "arena")]
-    pub herd: Arc<Herd>,
 }
 
 impl Accept {
-    pub fn new(
-        tcp_stream: TcpStream,
-        option: Options,
-        #[cfg(feature = "arena")] herd: Arc<Herd>,
-    ) -> Self {
-        Self {
-            tcp_stream,
-            option,
-            #[cfg(feature = "arena")]
-            herd,
-        }
+    pub fn new(tcp_stream: TcpStream, option: Options) -> Self {
+        Self { tcp_stream, option }
     }
 
     pub async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), SendableError> {
@@ -438,7 +408,7 @@ impl Accept {
 
         Ok(self
             .tcp_stream
-            .parse_request_arena_writer(&self.option, self.herd)
+            .parse_request_arena_writer(&self.option)
             .await?)
     }
 }
@@ -453,7 +423,7 @@ pub struct Body {
 #[cfg(feature = "arena")]
 #[repr(align(64))]
 pub struct ArenaBody {
-    _member: Box<Member<'static>>,
+    _bump: Box<Bump>,
     data_ptr: *const u8,
     total_len: usize,
     header_end: usize,
@@ -463,21 +433,20 @@ pub struct ArenaBody {
 
 #[cfg(feature = "arena")]
 impl ArenaBody {
-    // 안전한 생성자
-    pub fn new(
-        member: Member<'_>,
-        allocated_data: &[u8],
-        header_end: usize,
-        body_start: usize,
-    ) -> Self {
-        let member_box = unsafe {
-            std::mem::transmute::<Box<Member<'_>>, Box<Member<'static>>>(Box::new(member))
-        };
+    /// Create ArenaBody with per-request Bump allocator
+    /// Memory is automatically freed when ArenaBody is dropped
+    pub fn new(data: &[u8], header_end: usize, body_start: usize) -> Self {
+        let bump = Box::new(Bump::new());
+        // SAFETY: The bump allocator is owned by this struct and will not be dropped
+        // until the struct is dropped. The pointer remains valid for the lifetime of the struct.
+        let allocated_data = bump.alloc_slice_copy(data);
+        let data_ptr = allocated_data.as_ptr();
+        let total_len = allocated_data.len();
 
         Self {
-            _member: member_box,
-            data_ptr: allocated_data.as_ptr(),
-            total_len: allocated_data.len(),
+            _bump: bump,
+            data_ptr,
+            total_len,
             header_end,
             body_start,
             ip: None,
@@ -550,8 +519,7 @@ fn is_connection_error(e: &io::Error) -> bool {
 #[cfg(feature = "arena")]
 pub struct ArenaWriter {
     pub stream: TcpStream,
-    pub herd: Arc<Herd>,
-    _member: Option<Box<Member<'static>>>,
+    _bump: Option<Box<Bump>>,
     response_data_ptr: *const u8,
     response_data_len: usize,
     pub use_file: bool,
@@ -560,11 +528,10 @@ pub struct ArenaWriter {
 
 #[cfg(feature = "arena")]
 impl ArenaWriter {
-    pub fn new(stream: TcpStream, herd: Arc<Herd>, options: Options) -> Self {
+    pub fn new(stream: TcpStream, options: Options) -> Self {
         Self {
             stream,
-            herd,
-            _member: None,
+            _bump: None,
             response_data_ptr: std::ptr::null(),
             response_data_len: 0,
             use_file: false,
@@ -586,17 +553,12 @@ impl ArenaWriter {
     }
 
     pub fn set_arena_response(&mut self, data: &str) -> Result<bool, SendableError> {
-        let member = self.herd.get();
-        let allocated_data = member.alloc_str(data);
-
-        // SAFETY: Member의 수명을 'static으로 변환하고 포인터로 저장
-        let member_box = unsafe {
-            std::mem::transmute::<Box<Member<'_>>, Box<Member<'static>>>(Box::new(member))
-        };
+        let bump = Box::new(Bump::new());
+        let allocated_data = bump.alloc_str(data);
 
         self.response_data_ptr = allocated_data.as_ptr();
         self.response_data_len = allocated_data.len();
-        self._member = Some(member_box);
+        self._bump = Some(bump);
         Ok(true)
     }
 
@@ -628,22 +590,18 @@ impl ArenaWriter {
         let root_path = &self.options.root_path;
         let file_path = root_path.join(path);
 
-        let member = self.herd.get();
+        let bump = Box::new(Bump::new());
 
         if let Ok(metadata) = std::fs::metadata(&file_path) {
             let file_size = metadata.len() as usize;
             if file_size <= self.options.zero_copy_threshold {
                 let path_with_marker =
                     format!("__ZERO_COPY_FILE__:{}", file_path.to_str().unwrap());
-                let allocated_path = member.alloc_str(&path_with_marker);
-
-                let member_box = unsafe {
-                    std::mem::transmute::<Box<Member<'_>>, Box<Member<'static>>>(Box::new(member))
-                };
+                let allocated_path = bump.alloc_str(&path_with_marker);
 
                 self.response_data_ptr = allocated_path.as_ptr();
                 self.response_data_len = allocated_path.len();
-                self._member = Some(member_box);
+                self._bump = Some(bump);
                 self.use_file = true;
                 return Ok(());
             }
@@ -651,15 +609,11 @@ impl ArenaWriter {
 
         // 기존 방식
         let path_str = file_path.to_str().unwrap();
-        let allocated_path = member.alloc_str(path_str);
-
-        let member_box = unsafe {
-            std::mem::transmute::<Box<Member<'_>>, Box<Member<'static>>>(Box::new(member))
-        };
+        let allocated_path = bump.alloc_str(path_str);
 
         self.response_data_ptr = allocated_path.as_ptr();
         self.response_data_len = allocated_path.len();
-        self._member = Some(member_box);
+        self._bump = Some(bump);
         self.use_file = true;
         Ok(())
     }

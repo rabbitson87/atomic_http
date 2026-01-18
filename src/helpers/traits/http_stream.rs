@@ -1,13 +1,9 @@
 use crate::dev_print;
 use async_trait::async_trait;
-#[cfg(feature = "arena")]
-use bumpalo_herd::Herd;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
 #[cfg(feature = "tokio_rustls")]
 use tokio_rustls::server::TlsStream;
-#[cfg(feature = "arena")]
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{self, AsyncReadExt};
 use tokio::net::TcpStream;
@@ -709,7 +705,6 @@ pub trait StreamHttpArena {
     async fn parse_request_arena(
         self,
         options: &Options,
-        herd: Arc<Herd>,
     ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError>;
 }
 
@@ -719,11 +714,10 @@ impl StreamHttpArena for TcpStream {
     async fn parse_request_arena(
         self,
         options: &Options,
-        herd: Arc<Herd>,
     ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
-        let (arena_body, stream) = get_bytes_arena_direct(self, options, herd).await?;
+        let (arena_body, stream) = get_bytes_arena_direct(self, options).await?;
         let request = parse_http_request_arena(arena_body)?;
 
         Ok(get_parse_result_arena(request, stream, options)?)
@@ -734,7 +728,6 @@ impl StreamHttpArena for TcpStream {
 async fn get_bytes_arena_direct(
     mut stream: TcpStream,
     options: &Options,
-    herd: Arc<Herd>,
 ) -> Result<(ArenaBody, TcpStream), SendableError> {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -742,7 +735,6 @@ async fn get_bytes_arena_direct(
     const INITIAL_ARENA_SIZE: usize = 8192;
     const HEADER_END_MARKER: &[u8] = b"\r\n\r\n";
 
-    let member = herd.get();
     let buffer_size = match options.read_buffer_size {
         0 => INITIAL_ARENA_SIZE,
         _ => options.read_buffer_size,
@@ -782,10 +774,10 @@ async fn get_bytes_arena_direct(
                     // 헤더 끝 찾기
                     let search_start = current_len.saturating_sub(HEADER_END_MARKER.len() - 1);
                     if let Some(pos) = find_header_end_optimized(&temp_header_buf[search_start..]) {
-                    header_end_pos = Some(search_start + pos + 4);
-                    content_length = extract_content_length_simple(&temp_header_buf[..header_end_pos.unwrap()]);
-                    break;
-                }
+                        header_end_pos = Some(search_start + pos + 4);
+                        content_length = extract_content_length_simple(&temp_header_buf[..header_end_pos.unwrap()]);
+                        break;
+                    }
                     retry_count = 0;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -805,24 +797,30 @@ async fn get_bytes_arena_direct(
     let header_end = header_end_pos.unwrap_or(temp_header_buf.len());
     let total_size = header_end + content_length.unwrap_or(0);
 
-    // 2단계: 정확한 크기로 Arena 할당
-    let arena_data = member.alloc_slice_fill_default::<u8>(total_size);
+    // 2단계: 남은 바디 데이터 읽기 (Vec으로)
+    let mut final_buffer = if total_size > temp_header_buf.len() {
+        let mut buf = Vec::with_capacity(total_size);
+        buf.extend_from_slice(&temp_header_buf);
+        buf
+    } else {
+        temp_header_buf
+    };
 
-    // 3단계: 이미 읽은 헤더 데이터를 Arena로 복사 (한 번만)
-    let already_read = temp_header_buf.len().min(total_size);
-    arena_data[..already_read].copy_from_slice(&temp_header_buf[..already_read]);
-
-    // 4단계: 남은 바디 데이터를 Arena에 직접 읽기
-    let mut total_read = already_read;
+    // 3단계: 남은 바디 데이터 읽기
+    let mut total_read = final_buffer.len();
     retry_count = 0;
 
     while total_read < total_size && retry_count < options.read_max_retry {
         let remaining = total_size - total_read;
         let chunk_size = remaining.min(options.read_buffer_size);
 
+        if final_buffer.len() < total_read + chunk_size {
+            final_buffer.resize(total_read + chunk_size, 0);
+        }
+
         match tokio::time::timeout(
             read_timeout,
-            stream.read(&mut arena_data[total_read..total_read + chunk_size]),
+            stream.read(&mut final_buffer[total_read..total_read + chunk_size]),
         )
         .await
         {
@@ -839,12 +837,14 @@ async fn get_bytes_arena_direct(
         }
     }
 
-    // ArenaBody 생성
+    final_buffer.truncate(total_read);
+
+    // 4단계: ArenaBody 생성 (per-request Bump 사용)
     let body_start = header_end;
-    let arena_body = ArenaBody::new(member, &arena_data[..total_read], header_end, body_start);
+    let arena_body = ArenaBody::new(&final_buffer, header_end, body_start);
 
     dev_print!(
-        "Arena HTTP 파싱 완료: 헤더={}B, 바디={}B, 총={}B (Arena 할당)",
+        "Arena HTTP 파싱 완료: 헤더={}B, 바디={}B, 총={}B (Per-request Arena)",
         header_end,
         total_read.saturating_sub(header_end),
         total_read
@@ -949,7 +949,6 @@ pub trait StreamHttpArenaWriter {
     async fn parse_request_arena_writer(
         self,
         options: &Options,
-        herd: Arc<Herd>,
     ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError>;
 }
 
@@ -959,16 +958,13 @@ impl StreamHttpArenaWriter for TcpStream {
     async fn parse_request_arena_writer(
         self,
         options: &Options,
-        herd: Arc<Herd>,
     ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
-        let (arena_body, stream) = get_bytes_arena_direct(self, options, herd.clone()).await?;
+        let (arena_body, stream) = get_bytes_arena_direct(self, options).await?;
         let request = parse_http_request_arena(arena_body)?;
 
-        Ok(get_parse_result_arena_writer(
-            request, stream, options, herd,
-        )?)
+        Ok(get_parse_result_arena_writer(request, stream, options)?)
     }
 }
 
@@ -977,7 +973,6 @@ fn get_parse_result_arena_writer(
     mut request: Request<ArenaBody>,
     stream: TcpStream,
     options: &Options,
-    herd: Arc<Herd>,
 ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
     let version = request.version();
     request.body_mut().ip = options.current_client_addr;
@@ -988,7 +983,7 @@ fn get_parse_result_arena_writer(
             .version(version)
             .header(CONTENT_TYPE, "application/json")
             .status(400)
-            .body(ArenaWriter::new(stream, herd, options.clone()))?,
+            .body(ArenaWriter::new(stream, options.clone()))?,
     ))
 }
 
@@ -999,19 +994,20 @@ mod tests {
     #[test]
     fn test_header_end_detection() {
         let test_cases = vec![
-            // 작은 헤더
-            (b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".as_slice(), Some(35)),
-            
+            // 작은 헤더: "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+            // \r\n\r\n 시작 위치 = 33 (15 + 2 + 17 - 1 = index 33)
+            (b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".as_slice(), Some(33)),
+
             // 일반적인 헤더
-            (b"POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n".as_slice(), Some(84)),
-            
+            (b"POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n".as_slice(), Some(90)),
+
             // 헤더 끝이 없는 경우
             (b"GET / HTTP/1.1\r\nHost: example.com\r\n".as_slice(), None),
-            
+
             // 빈 데이터
             (b"".as_slice(), None),
         ];
-        
+
         for (data, expected) in test_cases {
             let result = find_header_end_optimized(data);
             assert_eq!(result, expected, "Failed for data: {:?}", std::str::from_utf8(data));
