@@ -1,5 +1,9 @@
 # Changes
 
+## 0.9.2
+
+* Add encoding when response_file feature.
+
 ## 0.9.1
 
 * Fixed for arena feature.

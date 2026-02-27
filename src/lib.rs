@@ -587,8 +587,12 @@ impl ArenaWriter {
     where
         P: AsRef<Path>,
     {
+        use percent_encoding::percent_decode_str;
+
         let root_path = &self.options.root_path;
-        let file_path = root_path.join(path);
+        let path_ref = path.as_ref().to_str().unwrap_or_default();
+        let decoded_path = percent_decode_str(path_ref).decode_utf8_lossy();
+        let file_path = root_path.join(decoded_path.as_ref());
 
         let bump = Box::new(Bump::new());
 
