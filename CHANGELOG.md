@@ -1,5 +1,9 @@
 # Changes
 
+## 0.9.3
+
+* Add mtime-based cache invalidation for response_file.
+
 ## 0.9.2
 
 * Add encoding when response_file feature.

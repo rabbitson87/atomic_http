@@ -145,16 +145,18 @@ impl<'a> Iterator for LineIterator<'a> {
 pub struct CachedFileData {
     data: Vec<u8>,
     last_accessed: SystemTime,
+    modified_time: SystemTime,
     file_path: PathBuf,
     original_size: usize,
 }
 
 impl CachedFileData {
-    pub fn new(data: Vec<u8>, file_path: PathBuf) -> Self {
+    pub fn new(data: Vec<u8>, file_path: PathBuf, modified_time: SystemTime) -> Self {
         let original_size = data.len();
         Self {
             data,
             last_accessed: SystemTime::now(),
+            modified_time,
             file_path,
             original_size,
         }
@@ -285,7 +287,8 @@ impl ZeroCopyCache {
         
         // 작은 파일: 메모리 캐시 사용
         if file_size <= self.max_cache_file_size {
-            return self.load_from_memory_cache(path_buf, file_size);
+            let modified_time = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+            return self.load_from_memory_cache(path_buf, file_size, modified_time);
         }
         
         // 큰 파일: 직접 memmap2 사용 (캐시 안함)
@@ -295,22 +298,28 @@ impl ZeroCopyCache {
     }
 
     /// 메모리 캐시에서 파일 로드
-    fn load_from_memory_cache(&self, path_buf: PathBuf, file_size: usize) -> Result<FileLoadResult, SendableError> {
+    fn load_from_memory_cache(&self, path_buf: PathBuf, file_size: usize, modified_time: SystemTime) -> Result<FileLoadResult, SendableError> {
         // 캐시에서 먼저 찾기
         {
             if let Some(mut cached_data) = self.memory_cache.get_mut(&path_buf) {
-                cached_data.update_access_time();
-                dev_print!("File loaded from memory cache: {:?} ({}KB)", path_buf, file_size / 1024);
-                return Ok(FileLoadResult::MemoryCache(cached_data.data.clone()));
+                // 파일 수정 시간 비교: 변경되지 않았으면 캐시 사용
+                if cached_data.modified_time == modified_time {
+                    cached_data.update_access_time();
+                    dev_print!("File loaded from memory cache: {:?} ({}KB)", path_buf, file_size / 1024);
+                    return Ok(FileLoadResult::MemoryCache(cached_data.data.clone()));
+                }
+                // 파일이 변경됨 → guard drop 후 재로드
+                dev_print!("File modified, reloading cache: {:?}", path_buf);
+                drop(cached_data);
             }
         }
 
-        // 캐시에 없으면 파일을 읽어서 메모리에 저장
+        // 캐시에 없거나 파일이 변경된 경우 → 파일을 읽어서 메모리에 저장
         dev_print!("Loading file to memory cache: {:?} ({}KB)", path_buf, file_size / 1024);
         let file_data = std::fs::read(&path_buf)?;
-        let cached_data = CachedFileData::new(file_data.clone(), path_buf.clone());
+        let cached_data = CachedFileData::new(file_data.clone(), path_buf.clone(), modified_time);
 
-        // 캐시에 추가
+        // 캐시에 추가 (또는 갱신)
         {
             // 캐시 용량 관리
             self.ensure_cache_capacity(self.memory_cache.clone(), file_size);
@@ -509,4 +518,93 @@ where
 {
     let file_result = cache.load_file(path)?;
     file_result.parse_json()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn create_test_cache() -> ZeroCopyCache {
+        ZeroCopyCache::from_config(CacheConfig {
+            max_cache_files: 10,
+            max_cache_file_size: 1024 * 1024,
+            total_cache_size_limit: 10 * 1024 * 1024,
+            cache_duration: Duration::from_secs(300),
+        })
+    }
+
+    #[test]
+    fn test_cache_returns_fresh_data() {
+        let cache = create_test_cache();
+        let dir = std::env::temp_dir().join("atomic_http_test_fresh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("test_fresh.txt");
+
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        let result1 = cache.load_file(&file_path).unwrap();
+        assert_eq!(result1.as_bytes(), b"hello");
+
+        // 동일 파일 재요청 → 캐시 히트 (동일 내용)
+        let result2 = cache.load_file(&file_path).unwrap();
+        assert_eq!(result2.as_bytes(), b"hello");
+        assert!(result2.is_memory_cached());
+
+        std::fs::remove_file(&file_path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_cache_invalidates_on_file_modification() {
+        let cache = create_test_cache();
+        let dir = std::env::temp_dir().join("atomic_http_test_mtime");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("test_mtime.txt");
+
+        // 초기 파일 작성 및 캐시
+        std::fs::write(&file_path, b"version1").unwrap();
+        let result1 = cache.load_file(&file_path).unwrap();
+        assert_eq!(result1.as_bytes(), b"version1");
+
+        // mtime 변경을 보장하기 위해 1초 대기 후 파일 수정
+        std::thread::sleep(Duration::from_secs(1));
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&file_path)
+            .unwrap();
+        file.write_all(b"version2").unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        // 수정 후 요청 → 변경된 내용 반환
+        let result2 = cache.load_file(&file_path).unwrap();
+        assert_eq!(result2.as_bytes(), b"version2");
+
+        std::fs::remove_file(&file_path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_cache_stats_after_reload() {
+        let cache = create_test_cache();
+        let dir = std::env::temp_dir().join("atomic_http_test_stats");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("test_stats.txt");
+
+        std::fs::write(&file_path, b"data").unwrap();
+        cache.load_file(&file_path).unwrap();
+        assert_eq!(cache.stats().file_count, 1);
+
+        // 파일 수정 후 재로드 → 캐시 엔트리 갱신 (개수 유지)
+        std::thread::sleep(Duration::from_secs(1));
+        std::fs::write(&file_path, b"updated_data").unwrap();
+        cache.load_file(&file_path).unwrap();
+        assert_eq!(cache.stats().file_count, 1);
+
+        std::fs::remove_file(&file_path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
 }
