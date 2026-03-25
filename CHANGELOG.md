@@ -1,5 +1,9 @@
 # Changes
 
+## 0.10.0
+
+* Add websocket in stream.
+
 ## 0.9.3
 
 * Add mtime-based cache invalidation for response_file.

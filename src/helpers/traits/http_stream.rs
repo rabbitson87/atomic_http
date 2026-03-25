@@ -2,11 +2,11 @@ use crate::dev_print;
 use async_trait::async_trait;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
-#[cfg(feature = "tokio_rustls")]
-use tokio_rustls::server::TlsStream;
 use std::time::Duration;
 use tokio::io::{self, AsyncReadExt};
 use tokio::net::TcpStream;
+#[cfg(feature = "tokio_rustls")]
+use tokio_rustls::server::TlsStream;
 
 use crate::helpers::traits::bytes::SplitBytes;
 #[cfg(feature = "arena")]
@@ -340,7 +340,7 @@ impl StreamHttp for TlsStream<TcpStream> {
     }
 }
 
-fn get_parse_result_from_request(
+pub(crate) fn get_parse_result_from_request(
     mut request: Request<Body>,
     stream: TcpStream,
     options: &Options,
@@ -363,7 +363,7 @@ fn get_parse_result_from_request(
             })?,
     ))
 }
-async fn get_bytes_from_reader(
+pub(crate) async fn get_bytes_from_reader(
     mut stream: TcpStream,
     options: &Options,
 ) -> Result<(Vec<u8>, TcpStream), SendableError> {
@@ -374,7 +374,8 @@ async fn get_bytes_from_reader(
     let buffer_size = match options.read_buffer_size {
         0 => INITIAL_READ_SIZE,
         _ => options.read_buffer_size,
-    }.max(MAX_HEADER_SIZE);
+    }
+    .max(MAX_HEADER_SIZE);
 
     // 1단계: 작은 버퍼로 헤더 먼저 읽기
     let mut header_buffer = Vec::with_capacity(buffer_size);
@@ -403,11 +404,15 @@ async fn get_bytes_from_reader(
 
                     // 새로 추가된 부분부터 헤더 끝 찾기 (중복 스캔 방지)
                     let search_start = current_len.saturating_sub(HEADER_END_MARKER.len() - 1);
-                if let Some(relative_pos) = find_header_end_optimized(&header_buffer[search_start..]) {
-                    header_end_pos = Some(search_start + relative_pos + 4); // +4 for "\r\n\r\n"
-                    content_length = extract_content_length_simple(&header_buffer[..header_end_pos.unwrap()]);
-                    break;
-                }
+                    if let Some(relative_pos) =
+                        find_header_end_optimized(&header_buffer[search_start..])
+                    {
+                        header_end_pos = Some(search_start + relative_pos + 4); // +4 for "\r\n\r\n"
+                        content_length = extract_content_length_simple(
+                            &header_buffer[..header_end_pos.unwrap()],
+                        );
+                        break;
+                    }
                     retry_count = 0;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -489,29 +494,27 @@ async fn get_bytes_from_reader(
 fn determine_next_read_size(current_size: usize) -> usize {
     match current_size {
         0..=512 => 1024,      // 작은 헤더: 1KB 단위
-        513..=4096 => 2048,   // 보통 헤더: 2KB 단위  
+        513..=4096 => 2048,   // 보통 헤더: 2KB 단위
         4097..=16384 => 4096, // 큰 헤더: 4KB 단위
         _ => 8192,            // 매우 큰 헤더: 8KB 단위
     }
 }
 
 // ✅ 간단하고 빠른 헤더 끝 찾기 (SIMD 없이도 충분히 빠름)
-fn find_header_end_optimized(data: &[u8]) -> Option<usize> {
+pub(crate) fn find_header_end_optimized(data: &[u8]) -> Option<usize> {
     if data.len() < 4 {
         return None;
     }
-    
+
     // 최적화된 단순 검색 - 대부분의 경우 충분히 빠릅니다
     let mut i = 0;
     while i <= data.len() - 4 {
         // 4바이트를 한 번에 비교 (컴파일러가 최적화)
-        if data[i] == b'\r' && 
-           data[i + 1] == b'\n' && 
-           data[i + 2] == b'\r' && 
-           data[i + 3] == b'\n' {
+        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n'
+        {
             return Some(i);
         }
-        
+
         // 첫 번째 바이트가 \r이 아니면 빠르게 스킵
         if data[i] != b'\r' {
             // \r을 찾을 때까지 빠르게 이동
@@ -522,7 +525,7 @@ fn find_header_end_optimized(data: &[u8]) -> Option<usize> {
             i += 1;
         }
     }
-    
+
     None
 }
 
@@ -530,20 +533,22 @@ fn find_header_end_optimized(data: &[u8]) -> Option<usize> {
 fn extract_content_length_simple(headers: &[u8]) -> Option<usize> {
     // 바이트 단위로 직접 검색 (String 변환 없음)
     let pattern = b"content-length:";
-    
+
     // 대소문자 구분 없이 검색
     if let Some(start_pos) = find_pattern_case_insensitive(headers, pattern) {
         let value_start = start_pos + pattern.len();
-        
+
         // 숫자 부분만 추출
         let mut _value_end = value_start;
         let mut number_start = value_start;
-        
+
         // 공백 스킵
-        while number_start < headers.len() && (headers[number_start] == b' ' || headers[number_start] == b'\t') {
+        while number_start < headers.len()
+            && (headers[number_start] == b' ' || headers[number_start] == b'\t')
+        {
             number_start += 1;
         }
-        
+
         // 숫자 찾기
         _value_end = number_start;
         while _value_end < headers.len() {
@@ -553,14 +558,14 @@ fn extract_content_length_simple(headers: &[u8]) -> Option<usize> {
                 _ => break,
             }
         }
-        
+
         if _value_end > number_start {
             if let Ok(value_str) = std::str::from_utf8(&headers[number_start.._value_end]) {
                 return value_str.parse().ok();
             }
         }
     }
-    
+
     None
 }
 
@@ -569,7 +574,7 @@ fn find_pattern_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize
     if needle.len() > haystack.len() {
         return None;
     }
-    
+
     for i in 0..=haystack.len() - needle.len() {
         let mut matches = true;
         for j in 0..needle.len() {
@@ -584,11 +589,11 @@ fn find_pattern_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize
             return Some(i);
         }
     }
-    
+
     None
 }
 
-async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, SendableError> {
+pub(crate) async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, SendableError> {
     dev_print!("bytes len: {:?}", &bytes.len());
 
     let (header, bytes) = bytes.as_slice().split_header_body();
@@ -725,7 +730,7 @@ impl StreamHttpArena for TcpStream {
 }
 
 #[cfg(feature = "arena")]
-async fn get_bytes_arena_direct(
+pub(crate) async fn get_bytes_arena_direct(
     mut stream: TcpStream,
     options: &Options,
 ) -> Result<(ArenaBody, TcpStream), SendableError> {
@@ -738,7 +743,8 @@ async fn get_bytes_arena_direct(
     let buffer_size = match options.read_buffer_size {
         0 => INITIAL_ARENA_SIZE,
         _ => options.read_buffer_size,
-    }.max(MAX_HEADER_SIZE);
+    }
+    .max(MAX_HEADER_SIZE);
 
     // 1단계: 헤더만 먼저 읽어서 Content-Length 파악
     let mut temp_header_buf = Vec::with_capacity(buffer_size);
@@ -775,7 +781,9 @@ async fn get_bytes_arena_direct(
                     let search_start = current_len.saturating_sub(HEADER_END_MARKER.len() - 1);
                     if let Some(pos) = find_header_end_optimized(&temp_header_buf[search_start..]) {
                         header_end_pos = Some(search_start + pos + 4);
-                        content_length = extract_content_length_simple(&temp_header_buf[..header_end_pos.unwrap()]);
+                        content_length = extract_content_length_simple(
+                            &temp_header_buf[..header_end_pos.unwrap()],
+                        );
                         break;
                     }
                     retry_count = 0;
@@ -854,7 +862,9 @@ async fn get_bytes_arena_direct(
 }
 
 #[cfg(feature = "arena")]
-fn parse_http_request_arena(mut body: ArenaBody) -> Result<Request<ArenaBody>, SendableError> {
+pub(crate) fn parse_http_request_arena(
+    mut body: ArenaBody,
+) -> Result<Request<ArenaBody>, SendableError> {
     let headers_bytes = body.get_headers();
     let headers_str = std::str::from_utf8(headers_bytes)?;
 
@@ -969,7 +979,7 @@ impl StreamHttpArenaWriter for TcpStream {
 }
 
 #[cfg(feature = "arena")]
-fn get_parse_result_arena_writer(
+pub(crate) fn get_parse_result_arena_writer(
     mut request: Request<ArenaBody>,
     stream: TcpStream,
     options: &Options,
@@ -990,7 +1000,7 @@ fn get_parse_result_arena_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_header_end_detection() {
         let test_cases = vec![
@@ -1010,48 +1020,56 @@ mod tests {
 
         for (data, expected) in test_cases {
             let result = find_header_end_optimized(data);
-            assert_eq!(result, expected, "Failed for data: {:?}", std::str::from_utf8(data));
+            assert_eq!(
+                result,
+                expected,
+                "Failed for data: {:?}",
+                std::str::from_utf8(data)
+            );
         }
     }
-    
+
     #[test]
     fn test_content_length_extraction() {
         let headers = b"GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 1234\r\nUser-Agent: test\r\n\r\n";
         let result = extract_content_length_simple(headers);
         assert_eq!(result, Some(1234));
-        
+
         // 대소문자 혼합
         let headers2 = b"GET / HTTP/1.1\r\nHost: example.com\r\nContent-LENGTH: 5678\r\n\r\n";
         let result2 = extract_content_length_simple(headers2);
         assert_eq!(result2, Some(5678));
-        
+
         // 없는 경우
         let headers3 = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let result3 = extract_content_length_simple(headers3);
         assert_eq!(result3, None);
     }
-    
+
     #[tokio::test]
     async fn test_large_header_handling() {
         // 큰 헤더 생성 (10KB Cookie)
         let large_cookie = "x".repeat(10240);
         let large_header = format!(
             "GET / HTTP/1.1\r\nHost: example.com\r\nCookie: {}\r\nContent-Length: 100\r\n\r\n{}",
-            large_cookie, "x".repeat(100)
+            large_cookie,
+            "x".repeat(100)
         );
-        
+
         // 실제 스트림을 시뮬레이션하기 위해 Cursor 사용
         use std::io::Cursor;
         Cursor::new(large_header.as_bytes());
-        
+
         // 헤더 끝 위치 확인
         let header_end = find_header_end_optimized(large_header.as_bytes());
         assert!(header_end.is_some());
 
         let content_length = extract_content_length_simple(large_header.as_bytes());
         assert_eq!(content_length, Some(100));
-        
-        println!("✅ 큰 헤더 테스트 통과: 헤더={}B, 바디=100B", 
-                header_end.unwrap() - 4);
+
+        println!(
+            "✅ 큰 헤더 테스트 통과: 헤더={}B, 바디=100B",
+            header_end.unwrap() - 4
+        );
     }
 }

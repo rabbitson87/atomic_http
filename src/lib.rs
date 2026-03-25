@@ -15,6 +15,9 @@ pub mod helpers;
 #[cfg(feature = "connection_pool")]
 pub mod connection_pool;
 
+#[cfg(feature = "websocket")]
+pub mod websocket;
+
 pub use helpers::traits::http_request::RequestUtils;
 #[cfg(feature = "arena")]
 pub use helpers::traits::http_request::RequestUtilsArena;
@@ -34,6 +37,12 @@ pub use helpers::traits::zero_copy::{
 #[cfg(feature = "connection_pool")]
 pub use connection_pool::{ConnectionPool, ConnectionPoolConfig, ConnectionStats};
 
+#[cfg(feature = "websocket")]
+pub use websocket::StreamResult;
+
+#[cfg(all(feature = "websocket", feature = "arena"))]
+pub use websocket::StreamResultArena;
+
 pub mod external {
     pub use async_trait;
     #[cfg(feature = "env")]
@@ -47,6 +56,9 @@ pub mod external {
     pub use bumpalo;
 
     pub use memmap2;
+
+    #[cfg(feature = "websocket")]
+    pub use tokio_tungstenite;
 }
 
 use http::{Request, Response};
@@ -398,6 +410,18 @@ impl Accept {
 
     pub async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), SendableError> {
         Ok(self.tcp_stream.parse_request(&self.option).await?)
+    }
+
+    #[cfg(feature = "websocket")]
+    pub async fn stream_parse(self) -> Result<StreamResult, SendableError> {
+        self.tcp_stream.set_nodelay(self.option.no_delay)?;
+        websocket::try_upgrade(self.tcp_stream, &self.option).await
+    }
+
+    #[cfg(all(feature = "websocket", feature = "arena"))]
+    pub async fn stream_parse_arena(self) -> Result<StreamResultArena, SendableError> {
+        self.tcp_stream.set_nodelay(self.option.no_delay)?;
+        websocket::try_upgrade_arena(self.tcp_stream, &self.option).await
     }
 
     #[cfg(feature = "arena")]

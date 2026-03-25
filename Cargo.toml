@@ -1,6 +1,6 @@
 [package]
 name = "atomic_http"
-version = "0.9.3"
+version = "0.10.0"
 authors = ["hsng95@gmail.com"]
 description = "High level HTTP server library"
 homepage = "https://github.com/rabbitson87/atomic_http"
@@ -43,6 +43,7 @@ bumpalo = { version = "3.20.2", features = [
 percent-encoding = { version = "2.3.2", optional = true }
 dashmap = "6.1.0"
 futures = { version = "0.3.32", optional = true }
+tokio-tungstenite = { version = "0.28.0", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
@@ -100,6 +101,10 @@ name = "connection_pool_benchmark"
 [[example]]
 name = "simple_connection_test"
 
+[[example]]
+name = "websocket_echo_test"
+required-features = ["websocket"]
+
 [features]
 default = ["arena", "simd", "vectored_io", "connection_pool"]
 tokio_rustls = ["dep:tokio-rustls"]
@@ -110,3 +115,4 @@ arena = ["dep:bumpalo"]
 simd = []
 vectored_io = []
 connection_pool = ["dep:futures"]
+websocket = ["dep:tokio-tungstenite", "dep:futures"]
