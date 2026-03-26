@@ -18,6 +18,9 @@ pub mod connection_pool;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
+#[cfg(feature = "router")]
+pub mod router;
+
 pub use helpers::traits::http_request::RequestUtils;
 #[cfg(feature = "arena")]
 pub use helpers::traits::http_request::RequestUtilsArena;

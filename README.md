@@ -20,6 +20,9 @@ atomic_http = { version = "0.6.0", features = ["arena"] }
 ## 🛠️ 기능별 Features
 
 - `arena`: Arena 메모리 관리 (기본 활성화)
+- `router`: Radix trie 기반 라우터 ([마이그레이션 가이드](docs/router-migration.md))
+- `websocket`: WebSocket 업그레이드 지원
+- `connection_pool`: Keep-alive 연결 풀링
 - `response_file`: 파일 응답 지원
 - `env`: 환경변수 설정 지원
 - `debug`: 디버그 출력 활성화

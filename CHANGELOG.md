@@ -1,5 +1,9 @@
 # Changes
 
+## 0.11.0
+
+* Add radix trie router with matchit (feature-gated as `router`).
+
 ## 0.10.0
 
 * Add websocket in stream.
