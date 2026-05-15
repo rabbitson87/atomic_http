@@ -49,7 +49,7 @@ pub use websocket::StreamResultArena;
 pub mod external {
     pub use async_trait;
     #[cfg(feature = "env")]
-    pub use dotenv;
+    pub use dotenvy;
     pub use http;
     #[cfg(feature = "response_file")]
     pub use mime_guess;

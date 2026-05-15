@@ -1,5 +1,5 @@
 use atomic_http::{
-    external::dotenv::dotenv, router::Router, ArenaBody, ArenaWriter, ResponseUtilArena,
+    external::dotenvy::dotenv, router::Router, ArenaBody, ArenaWriter, ResponseUtilArena,
     SendableError, Server, StreamResultArena,
 };
 use futures::{SinkExt, StreamExt};
