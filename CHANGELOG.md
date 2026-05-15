@@ -1,5 +1,9 @@
 # Changes
 
+## 0.11.2
+
+* Update dependencies.
+
 ## 0.11.1
 
 * Update dependencies.
