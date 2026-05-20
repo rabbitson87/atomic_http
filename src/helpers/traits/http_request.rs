@@ -1,10 +1,7 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use http::HeaderName;
 use http::Request;
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 use crate::dev_print;
 #[cfg(feature = "arena")]
@@ -58,81 +55,99 @@ impl RequestUtils for Request<Body> {
     }
 
     async fn get_multi_part(&mut self) -> Result<Option<Form>, SendableError> {
-        if let Some(content_type) = self.headers().get("content-type") {
-            let content_type: Cow<str> = content_type.to_str()?.into();
-            if !content_type.contains("multipart/form-data") {
-                return Ok(None);
-            }
-            let boundary: Cow<str> = content_type.split("boundary=").last().unwrap().into();
-            let mut form = Form::new();
+        // 메모리에 이미 있는 &[u8]를 처리하므로 async BufReader는 불필요.
+        // 헤더/바디는 \r\n\r\n 으로 직접 분리, 바디 슬라이스는 trim 후 사용.
+        let content_type_str = match self.headers().get("content-type") {
+            Some(ct) => ct.to_str()?,
+            None => return Ok(None),
+        };
+        if !content_type_str.contains("multipart/form-data") {
+            return Ok(None);
+        }
+        let boundary = match content_type_str.split("boundary=").nth(1) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
 
-            for part_data in self
-                .body()
-                .bytes
-                .as_slice()
-                .split_bytes(format!("--{}", &boundary).as_bytes())
-            {
-                dev_print!("part_data: {:?}", &part_data.len());
-                let mut part_string = String::new();
-                let mut part_bytes = BufReader::new(part_data.as_slice());
-                while let Ok(n) = part_bytes.read_line(&mut part_string).await {
-                    if n == 0 {
-                        break;
-                    }
+        let boundary_marker = format!("--{}", boundary);
+        let boundary_bytes = boundary_marker.as_bytes();
+        let mut form = Form::new();
+
+        for part_data in self.body().bytes.as_slice().split_bytes(boundary_bytes) {
+            dev_print!("part_data: {:?}", part_data.len());
+
+            // 헤더/바디 경계 (\r\n\r\n) 찾기
+            let split_pos = match part_data.windows(4).position(|w| w == b"\r\n\r\n") {
+                Some(p) => p,
+                None => continue,
+            };
+            let header_bytes = &part_data[..split_pos];
+            let body_bytes = &part_data[split_pos + 4..];
+
+            // 헤더는 ASCII 텍스트라고 가정 (HTTP 표준)
+            let header_str = match std::str::from_utf8(header_bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let mut part = Part::new();
+            let mut text_field_name: Option<String> = None;
+
+            for line in header_str.split("\r\n") {
+                dev_print!("{}", line);
+                if line.is_empty() {
+                    continue;
                 }
-                let mut line_split = part_string.split("\r\n").collect::<Vec<_>>();
-
-                let mut part = Part::new();
-
-                for line in line_split.iter_mut() {
-                    dev_print!("{}", line);
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if line.to_lowercase().contains("content-disposition") {
-                        let size_split = line.split(": ");
-                        if let Some(value) = size_split.last() {
-                            if value.contains("filename=") {
-                                let mut headers = value.get_header_child();
-                                if let Some(name) = headers.get_mut("name") {
-                                    part.set_name(name);
-                                }
-
-                                if let Some(file_name) = headers.get_mut("filename") {
-                                    part.set_file_name(file_name);
-                                }
-                            } else if value.contains("name=") {
-                                let mut headers = value.get_header_child();
-                                if let Some(name) = headers.get_mut("name") {
-                                    form.text = (std::mem::take(name).into(), "".into());
-                                }
+                // content-disposition 라인은 대소문자 무관 매칭
+                if line.len() >= 19
+                    && line.as_bytes()[..19].eq_ignore_ascii_case(b"content-disposition")
+                {
+                    if let Some(value) = line.split(": ").nth(1) {
+                        if value.contains("filename=") {
+                            let mut headers = value.get_header_child();
+                            if let Some(name) = headers.get_mut("name") {
+                                part.set_name(name);
+                            }
+                            if let Some(file_name) = headers.get_mut("filename") {
+                                part.set_file_name(file_name);
+                            }
+                        } else if value.contains("name=") {
+                            let mut headers = value.get_header_child();
+                            if let Some(name) = headers.get_mut("name") {
+                                text_field_name = Some(std::mem::take(name).into());
                             }
                         }
-                    } else if !line.contains(": ") {
-                        form.text.1 = std::mem::take(line).into();
-                    } else {
-                        let mut size_split = line.split(": ").collect::<Vec<_>>();
-                        if size_split.len() != 2 {
-                            continue;
+                    }
+                } else if let Some((key, value)) = line.split_once(": ") {
+                    if let Ok(hname) =
+                        HeaderName::from_lowercase(key.to_ascii_lowercase().as_bytes())
+                    {
+                        if let Ok(hval) = value.parse() {
+                            part.headers.insert(hname, hval);
                         }
-                        part.headers.insert(
-                            HeaderName::from_lowercase(
-                                std::mem::take(&mut size_split[0]).to_lowercase().as_bytes(),
-                            )?,
-                            std::mem::take(&mut size_split[1]).parse().unwrap(),
-                        );
                     }
                 }
-
-                if !part.file_name.is_empty() {
-                    part_bytes.read_to_end(&mut part.body).await?;
-                    form.parts.push(part);
-                }
             }
-            return Ok(Some(form));
-        } else {
-            Ok(None)
+
+            // 바디 끝 \r\n trim (boundary 라인 앞 구분자)
+            let mut body_end = body_bytes.len();
+            while body_end > 0
+                && (body_bytes[body_end - 1] == b'\n' || body_bytes[body_end - 1] == b'\r')
+            {
+                body_end -= 1;
+            }
+            let body_trimmed = &body_bytes[..body_end];
+
+            if !part.file_name.is_empty() {
+                part.body = body_trimmed.to_vec();
+                form.parts.push(part);
+            } else if let Some(name) = text_field_name {
+                // 단일 텍스트 필드: 마지막으로 본 것만 form.text에 보관 (기존 동작 유지)
+                form.text = (name, String::from_utf8_lossy(body_trimmed).into_owned());
+            }
         }
+
+        Ok(Some(form))
     }
 }
 
@@ -199,8 +214,12 @@ impl RequestUtilsArena for Request<ArenaBody> {
 
             let mut part = ArenaPartRef::new(body_bytes);
             let mut is_file = false;
+            // 텍스트 필드용 name 슬라이스(arena 내부 포인터)를 기억해 둠
+            let mut name_bytes_for_text: Option<&[u8]> = None;
 
-            // 헤더 파싱 - raw pointer로 직접 처리
+            // 헤더 파싱 - header_str은 arena_data에서 파생된 슬라이스이므로
+            // line, header_name, header_value 모두 이미 arena 내부 포인터를 가짐.
+            // 따라서 다시 검색할 필요 없이 그대로 사용.
             for line in header_str.split("\r\n") {
                 if line.trim().is_empty() {
                     continue;
@@ -211,45 +230,29 @@ impl RequestUtilsArena for Request<ArenaBody> {
                     let header_value = &line[colon_pos + 2..];
 
                     if header_name.eq_ignore_ascii_case("content-disposition") {
-                        // Content-Disposition 파싱
                         if let Some(name_value) =
                             extract_content_disposition_value(header_value, "name")
                         {
-                            // arena_data 내에서 name_value의 위치 찾기
-                            if let Some(name_slice) =
-                                find_slice_in_arena(arena_data, name_value.as_bytes())
-                            {
-                                part.set_name(name_slice);
-                            }
+                            let slice = name_value.as_bytes();
+                            part.set_name(slice);
+                            name_bytes_for_text = Some(slice);
                         }
 
                         if let Some(filename_value) =
                             extract_content_disposition_value(header_value, "filename")
                         {
-                            // arena_data 내에서 filename_value의 위치 찾기
-                            if let Some(filename_slice) =
-                                find_slice_in_arena(arena_data, filename_value.as_bytes())
-                            {
-                                part.set_file_name(filename_slice);
-                                is_file = true;
-                            }
+                            part.set_file_name(filename_value.as_bytes());
+                            is_file = true;
                         }
                     } else if header_name.eq_ignore_ascii_case("content-type") {
-                        if let Some(content_type_slice) =
-                            find_slice_in_arena(arena_data, header_value.as_bytes())
-                        {
-                            part.set_content_type(content_type_slice);
-                        }
+                        part.set_content_type(header_value.as_bytes());
                     }
 
-                    // 헤더 추가
-                    if let (Some(key_slice), Some(value_slice)) = (
-                        find_slice_in_arena(arena_data, header_name.as_bytes()),
-                        find_slice_in_arena(arena_data, header_value.as_bytes()),
-                    ) {
-                        part.headers
-                            .push(ArenaHeaderRef::new(key_slice, value_slice));
-                    }
+                    // 헤더 추가 - arena 내부 슬라이스 직접 사용
+                    part.headers.push(ArenaHeaderRef::new(
+                        header_name.as_bytes(),
+                        header_value.as_bytes(),
+                    ));
                 }
             }
 
@@ -259,18 +262,10 @@ impl RequestUtilsArena for Request<ArenaBody> {
 
             if is_file {
                 form.parts.push(part);
-            } else {
-                // 텍스트 필드 처리
-                if let (Some(name_slice), Some(body_slice)) = (
-                    find_slice_in_arena(arena_data, part.get_name().unwrap_or("").as_bytes()),
-                    if body_bytes.is_empty() {
-                        None
-                    } else {
-                        Some(body_bytes)
-                    },
-                ) {
+            } else if !body_bytes.is_empty() {
+                if let Some(name_slice) = name_bytes_for_text {
                     form.text_fields
-                        .push(ArenaTextFieldRef::new(name_slice, body_slice));
+                        .push(ArenaTextFieldRef::new(name_slice, body_bytes));
                 }
             }
         }
@@ -279,34 +274,22 @@ impl RequestUtilsArena for Request<ArenaBody> {
     }
 }
 
-// Content-Disposition에서 특정 값 추출
+// Content-Disposition에서 특정 값 추출 - 입력 슬라이스의 부분 슬라이스를 반환 (할당 없음)
 #[cfg(feature = "arena")]
-fn extract_content_disposition_value(header_value: &str, key: &str) -> Option<String> {
-    let key_pattern = format!("{}=", key);
-
+fn extract_content_disposition_value<'a>(header_value: &'a str, key: &str) -> Option<&'a str> {
+    let key_bytes = key.as_bytes();
     for part in header_value.split(';') {
         let part = part.trim();
-        if part.starts_with(&key_pattern) {
-            let value = &part[key_pattern.len()..];
-            // 따옴표 제거
+        let pb = part.as_bytes();
+        // "key=" 접두사 확인 (key는 대소문자 구분 없이)
+        if pb.len() > key_bytes.len()
+            && pb[key_bytes.len()] == b'='
+            && pb[..key_bytes.len()].eq_ignore_ascii_case(key_bytes)
+        {
+            let value = &part[key_bytes.len() + 1..];
+            // 따옴표 제거 (슬라이스 유지)
             let value = value.trim_matches('"').trim_matches('\'');
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-// Arena 데이터 내에서 특정 바이트 슬라이스 찾기
-#[cfg(feature = "arena")]
-fn find_slice_in_arena<'a>(arena_data: &'a [u8], target: &'a [u8]) -> Option<&'a [u8]> {
-    if target.is_empty() {
-        return None;
-    }
-
-    // arena_data에서 target과 같은 내용의 슬라이스 찾기
-    for i in 0..=arena_data.len().saturating_sub(target.len()) {
-        if &arena_data[i..i + target.len()] == target {
-            return Some(&arena_data[i..i + target.len()]);
+            return Some(value);
         }
     }
     None

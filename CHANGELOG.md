@@ -1,5 +1,15 @@
 # Changes
 
+## 0.12.0
+
+* Reduce per-request allocations across HTTP parsing, multipart, response, and file cache (multipart 1.3–1.7×, 1 MB cache hit 10.7× faster).
+* Switch HTTP parser to `httparse`; body bytes split off the input without copy.
+* `FileLoadResult::MemoryCache` payload: `Vec<u8>` → `Arc<[u8]>` (cache hits become atomic refcount).
+* `Options` passed as `Arc<Options>` through `Accept`/`Writer`/`ArenaWriter` and the stream traits.
+* `Server.connection_pool` and `ConnectionPool::global` no longer wrapped in outer `tokio::sync::Mutex`.
+* Rewrite `get_multi_part` synchronously and use vectored I/O on the bytes-response path.
+* File streaming uses a fixed 128 KB buffer; `[profile.release]` adds `lto = "fat"`, `codegen-units = 1`.
+
 ## 0.11.3
 
 * Add missing codes.

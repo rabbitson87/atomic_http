@@ -140,10 +140,11 @@ impl<'a> Iterator for LineIterator<'a> {
     }
 }
 
-/// 캐시된 파일 데이터 (메모리에 복사본 저장)
+/// 캐시된 파일 데이터.
+/// `Arc<[u8]>`로 보관하여 핸드오프 시 참조 카운트 증가만 발생 (zero-copy).
 #[derive(Debug)]
 pub struct CachedFileData {
-    data: Vec<u8>,
+    data: Arc<[u8]>,
     last_accessed: SystemTime,
     modified_time: SystemTime,
     file_path: PathBuf,
@@ -151,7 +152,7 @@ pub struct CachedFileData {
 }
 
 impl CachedFileData {
-    pub fn new(data: Vec<u8>, file_path: PathBuf, modified_time: SystemTime) -> Self {
+    pub fn new(data: Arc<[u8]>, file_path: PathBuf, modified_time: SystemTime) -> Self {
         let original_size = data.len();
         Self {
             data,
@@ -299,14 +300,14 @@ impl ZeroCopyCache {
 
     /// 메모리 캐시에서 파일 로드
     fn load_from_memory_cache(&self, path_buf: PathBuf, file_size: usize, modified_time: SystemTime) -> Result<FileLoadResult, SendableError> {
-        // 캐시에서 먼저 찾기
+        // 캐시에서 먼저 찾기 — Arc::clone은 atomic increment 1회 (실제 데이터 복사 없음)
         {
             if let Some(mut cached_data) = self.memory_cache.get_mut(&path_buf) {
                 // 파일 수정 시간 비교: 변경되지 않았으면 캐시 사용
                 if cached_data.modified_time == modified_time {
                     cached_data.update_access_time();
                     dev_print!("File loaded from memory cache: {:?} ({}KB)", path_buf, file_size / 1024);
-                    return Ok(FileLoadResult::MemoryCache(cached_data.data.clone()));
+                    return Ok(FileLoadResult::MemoryCache(Arc::clone(&cached_data.data)));
                 }
                 // 파일이 변경됨 → guard drop 후 재로드
                 dev_print!("File modified, reloading cache: {:?}", path_buf);
@@ -316,8 +317,9 @@ impl ZeroCopyCache {
 
         // 캐시에 없거나 파일이 변경된 경우 → 파일을 읽어서 메모리에 저장
         dev_print!("Loading file to memory cache: {:?} ({}KB)", path_buf, file_size / 1024);
-        let file_data = std::fs::read(&path_buf)?;
-        let cached_data = CachedFileData::new(file_data.clone(), path_buf.clone(), modified_time);
+        // Vec<u8> → Arc<[u8]> 1회 변환 (Vec의 버퍼를 그대로 인계)
+        let file_data: Arc<[u8]> = std::fs::read(&path_buf)?.into();
+        let cached_data = CachedFileData::new(Arc::clone(&file_data), path_buf.clone(), modified_time);
 
         // 캐시에 추가 (또는 갱신)
         {
@@ -416,8 +418,9 @@ impl ZeroCopyCache {
 
 /// 파일 로드 결과
 pub enum FileLoadResult {
-    /// 메모리 캐시에서 로드된 데이터 (소유권 있는 복사본)
-    MemoryCache(Vec<u8>),
+    /// 메모리 캐시에서 로드된 데이터.
+    /// `Arc<[u8]>`로 공유되며 캐시 히트 시 atomic increment만 발생 (zero-copy).
+    MemoryCache(Arc<[u8]>),
     /// 직접 메모리 매핑된 파일 (큰 파일용)
     DirectMemoryMap(ZeroCopyFile),
 }

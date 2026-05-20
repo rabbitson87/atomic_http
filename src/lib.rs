@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::{env::current_dir, io, net::SocketAddr, path::PathBuf};
 
 #[cfg(feature = "env")]
@@ -7,8 +8,6 @@ use std::str::FromStr;
 #[cfg(feature = "arena")]
 use bumpalo::Bump;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "connection_pool")]
-use std::sync::Arc;
 
 pub mod helpers;
 
@@ -85,7 +84,7 @@ pub struct Server {
     pub listener: TcpListener,
     pub options: Options,
     #[cfg(feature = "connection_pool")]
-    pub connection_pool: Option<Arc<tokio::sync::Mutex<ConnectionPool>>>,
+    pub connection_pool: Option<Arc<ConnectionPool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,9 +320,9 @@ impl Server {
     #[cfg(feature = "connection_pool")]
     pub fn enable_connection_pool(&mut self) -> Result<(), SendableError> {
         if self.options.is_connection_pool_enabled() {
-            let mut pool = ConnectionPool::new(self.options.connection_option.clone());
+            let pool = ConnectionPool::new(self.options.connection_option.clone());
             pool.start_cleanup_task();
-            self.connection_pool = Some(Arc::new(tokio::sync::Mutex::new(pool)));
+            self.connection_pool = Some(Arc::new(pool));
             dev_print!("✅ Connection pool enabled for server");
             Ok(())
         } else {
@@ -335,8 +334,7 @@ impl Server {
     /// Disable connection pooling
     #[cfg(feature = "connection_pool")]
     pub async fn disable_connection_pool(&mut self) {
-        if let Some(pool_arc) = self.connection_pool.take() {
-            let mut pool = pool_arc.lock().await;
+        if let Some(pool) = self.connection_pool.take() {
             pool.shutdown().await;
         }
         dev_print!("🔴 Connection pool disabled for server");
@@ -345,12 +343,7 @@ impl Server {
     /// Get connection pool statistics
     #[cfg(feature = "connection_pool")]
     pub async fn get_connection_pool_stats(&self) -> Option<ConnectionStats> {
-        if let Some(pool_arc) = &self.connection_pool {
-            let pool = pool_arc.lock().await;
-            Some(pool.stats())
-        } else {
-            None
-        }
+        self.connection_pool.as_ref().map(|pool| pool.stats())
     }
 
     /// Print connection pool statistics
@@ -366,8 +359,7 @@ impl Server {
     /// Clear connection pool
     #[cfg(feature = "connection_pool")]
     pub async fn clear_connection_pool(&self) {
-        if let Some(pool_arc) = &self.connection_pool {
-            let pool = pool_arc.lock().await;
+        if let Some(pool) = &self.connection_pool {
             pool.clear().await;
         }
     }
@@ -387,7 +379,8 @@ impl Server {
             }
         };
         self.options.current_client_addr = Some(addr);
-        Ok(Accept::new(stream, self.options.clone()))
+        // Options를 Arc로 한 번 감싸서 Accept/Writer 핸드오프 비용을 atomic increment로 축소.
+        Ok(Accept::new(stream, Arc::new(self.options.clone())))
     }
 
     pub fn set_no_delay(&mut self, no_delay: bool) {
@@ -403,28 +396,28 @@ impl Server {
 
 pub struct Accept {
     pub tcp_stream: TcpStream,
-    pub option: Options,
+    pub option: Arc<Options>,
 }
 
 impl Accept {
-    pub fn new(tcp_stream: TcpStream, option: Options) -> Self {
+    pub fn new(tcp_stream: TcpStream, option: Arc<Options>) -> Self {
         Self { tcp_stream, option }
     }
 
     pub async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), SendableError> {
-        Ok(self.tcp_stream.parse_request(&self.option).await?)
+        Ok(self.tcp_stream.parse_request(self.option).await?)
     }
 
     #[cfg(feature = "websocket")]
     pub async fn stream_parse(self) -> Result<StreamResult, SendableError> {
         self.tcp_stream.set_nodelay(self.option.no_delay)?;
-        websocket::try_upgrade(self.tcp_stream, &self.option).await
+        websocket::try_upgrade(self.tcp_stream, self.option).await
     }
 
     #[cfg(all(feature = "websocket", feature = "arena"))]
     pub async fn stream_parse_arena(self) -> Result<StreamResultArena, SendableError> {
         self.tcp_stream.set_nodelay(self.option.no_delay)?;
-        websocket::try_upgrade_arena(self.tcp_stream, &self.option).await
+        websocket::try_upgrade_arena(self.tcp_stream, self.option).await
     }
 
     #[cfg(feature = "arena")]
@@ -435,7 +428,7 @@ impl Accept {
 
         Ok(self
             .tcp_stream
-            .parse_request_arena_writer(&self.option)
+            .parse_request_arena_writer(self.option)
             .await?)
     }
 }
@@ -531,7 +524,7 @@ pub struct Writer {
     pub body: String,
     pub bytes: Vec<u8>,
     pub use_file: bool,
-    pub options: Options,
+    pub options: Arc<Options>,
 }
 
 fn is_connection_error(e: &io::Error) -> bool {
@@ -550,12 +543,12 @@ pub struct ArenaWriter {
     response_data_ptr: *const u8,
     response_data_len: usize,
     pub use_file: bool,
-    pub options: Options,
+    pub options: Arc<Options>,
 }
 
 #[cfg(feature = "arena")]
 impl ArenaWriter {
-    pub fn new(stream: TcpStream, options: Options) -> Self {
+    pub fn new(stream: TcpStream, options: Arc<Options>) -> Self {
         Self {
             stream,
             _bump: None,

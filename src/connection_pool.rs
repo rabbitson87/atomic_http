@@ -3,7 +3,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -206,8 +206,9 @@ pub struct ConnectionPool {
     connection_hits: AtomicU64,
     connection_misses: AtomicU64,
 
-    // Cleanup task handle
-    cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+    // Cleanup task handle — `&self`로 start/shutdown 호출 가능하도록 내부 가변성.
+    // std::sync::Mutex로 충분: .await 없이 take/replace만 수행.
+    cleanup_handle: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ConnectionPool {
@@ -220,14 +221,14 @@ impl ConnectionPool {
             reused_connections: AtomicU64::new(0),
             connection_hits: AtomicU64::new(0),
             connection_misses: AtomicU64::new(0),
-            cleanup_handle: None,
+            cleanup_handle: StdMutex::new(None),
         };
 
         pool
     }
 
     /// Start the cleanup task
-    pub fn start_cleanup_task(&mut self) {
+    pub fn start_cleanup_task(&self) {
         let pools = self.pools.clone();
         let config = self.config.clone();
 
@@ -240,7 +241,12 @@ impl ConnectionPool {
             }
         });
 
-        self.cleanup_handle = Some(handle);
+        // 기존 작업이 있다면 중단하고 교체
+        let mut slot = self.cleanup_handle.lock().expect("cleanup_handle mutex poisoned");
+        if let Some(prev) = slot.take() {
+            prev.abort();
+        }
+        *slot = Some(handle);
     }
 
     /// Get a connection from the pool or create a new one
@@ -424,9 +430,14 @@ impl ConnectionPool {
     }
 
     /// Shutdown the connection pool
-    pub async fn shutdown(&mut self) {
-        if let Some(handle) = self.cleanup_handle.take() {
-            handle.abort();
+    pub async fn shutdown(&self) {
+        let handle = self
+            .cleanup_handle
+            .lock()
+            .expect("cleanup_handle mutex poisoned")
+            .take();
+        if let Some(h) = handle {
+            h.abort();
         }
 
         self.clear().await;
@@ -436,34 +447,36 @@ impl ConnectionPool {
 
 impl Drop for ConnectionPool {
     fn drop(&mut self) {
-        if let Some(handle) = self.cleanup_handle.take() {
-            handle.abort();
+        if let Ok(mut slot) = self.cleanup_handle.lock() {
+            if let Some(handle) = slot.take() {
+                handle.abort();
+            }
         }
     }
 }
 
 // Global connection pool instance
 use std::sync::OnceLock;
-static GLOBAL_CONNECTION_POOL: OnceLock<Arc<Mutex<ConnectionPool>>> = OnceLock::new();
+static GLOBAL_CONNECTION_POOL: OnceLock<Arc<ConnectionPool>> = OnceLock::new();
 
 impl ConnectionPool {
     /// Initialize global connection pool
     pub fn init_global(config: Option<ConnectionPoolConfig>) {
         let config = config.unwrap_or_default();
-        let mut pool = ConnectionPool::new(config);
+        let pool = ConnectionPool::new(config);
         pool.start_cleanup_task();
 
-        let _ = GLOBAL_CONNECTION_POOL.set(Arc::new(Mutex::new(pool)));
+        let _ = GLOBAL_CONNECTION_POOL.set(Arc::new(pool));
         dev_print!("Global connection pool initialized");
     }
 
     /// Get global connection pool
-    pub async fn global() -> Arc<Mutex<ConnectionPool>> {
+    pub fn global() -> Arc<ConnectionPool> {
         GLOBAL_CONNECTION_POOL
             .get_or_init(|| {
-                let mut pool = ConnectionPool::new(ConnectionPoolConfig::default());
+                let pool = ConnectionPool::new(ConnectionPoolConfig::default());
                 pool.start_cleanup_task();
-                Arc::new(Mutex::new(pool))
+                Arc::new(pool)
             })
             .clone()
     }

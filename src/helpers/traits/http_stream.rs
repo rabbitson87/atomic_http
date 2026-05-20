@@ -2,13 +2,13 @@ use crate::dev_print;
 use async_trait::async_trait;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{self, AsyncReadExt};
 use tokio::net::TcpStream;
 #[cfg(feature = "tokio_rustls")]
 use tokio_rustls::server::TlsStream;
 
-use crate::helpers::traits::bytes::SplitBytes;
 #[cfg(feature = "arena")]
 use crate::{ArenaBody, ArenaWriter};
 use crate::{Body, Options, SendableError, Writer};
@@ -302,7 +302,7 @@ unsafe impl Sync for ArenaHeaderRef {}
 pub trait StreamHttp {
     async fn parse_request(
         self,
-        options: &Options,
+        options: Arc<Options>,
     ) -> Result<(Request<Body>, Response<Writer>), SendableError>;
 }
 
@@ -310,11 +310,11 @@ pub trait StreamHttp {
 impl StreamHttp for TcpStream {
     async fn parse_request(
         self,
-        options: &Options,
+        options: Arc<Options>,
     ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
-        let (bytes, stream) = get_bytes_from_reader(self, options).await?;
+        let (bytes, stream) = get_bytes_from_reader(self, &options).await?;
 
         let request = get_request(bytes).await?;
 
@@ -327,12 +327,12 @@ impl StreamHttp for TcpStream {
 impl StreamHttp for TlsStream<TcpStream> {
     async fn parse_request(
         self,
-        options: &Options,
+        options: Arc<Options>,
     ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
         let stream = self.into_inner().0;
         stream.set_nodelay(options.no_delay)?;
 
-        let (bytes, stream) = get_bytes_from_reader(stream, options).await?;
+        let (bytes, stream) = get_bytes_from_reader(stream, &options).await?;
 
         let request = get_request(bytes).await?;
 
@@ -343,7 +343,7 @@ impl StreamHttp for TlsStream<TcpStream> {
 pub(crate) fn get_parse_result_from_request(
     mut request: Request<Body>,
     stream: TcpStream,
-    options: &Options,
+    options: Arc<Options>,
 ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
     let version = request.version();
     request.body_mut().ip = options.current_client_addr;
@@ -359,7 +359,7 @@ pub(crate) fn get_parse_result_from_request(
                 body: String::new(),
                 bytes: vec![],
                 use_file: false,
-                options: options.clone(),
+                options,
             })?,
     ))
 }
@@ -529,177 +529,128 @@ pub(crate) fn find_header_end_optimized(data: &[u8]) -> Option<usize> {
     None
 }
 
-// ✅ 간단한 Content-Length 추출
+// ✅ Content-Length 추출 — 라인 단위 스캔 (O(n))
+// HTTP 헤더는 \r\n 구분이므로 각 라인의 시작 위치에서만 prefix 비교.
+// 이전의 모든 오프셋에서 풀 needle을 비교하던 O(n·m) 패턴을 제거.
 fn extract_content_length_simple(headers: &[u8]) -> Option<usize> {
-    // 바이트 단위로 직접 검색 (String 변환 없음)
-    let pattern = b"content-length:";
+    const PATTERN: &[u8] = b"content-length:";
 
-    // 대소문자 구분 없이 검색
-    if let Some(start_pos) = find_pattern_case_insensitive(headers, pattern) {
-        let value_start = start_pos + pattern.len();
-
-        // 숫자 부분만 추출
-        let mut _value_end = value_start;
-        let mut number_start = value_start;
-
-        // 공백 스킵
-        while number_start < headers.len()
-            && (headers[number_start] == b' ' || headers[number_start] == b'\t')
-        {
-            number_start += 1;
+    let mut line_start = 0;
+    while line_start + PATTERN.len() <= headers.len() {
+        // 라인 끝 찾기 (\n까지)
+        let mut line_end = line_start;
+        while line_end < headers.len() && headers[line_end] != b'\n' {
+            line_end += 1;
         }
 
-        // 숫자 찾기
-        _value_end = number_start;
-        while _value_end < headers.len() {
-            match headers[_value_end] {
-                b'0'..=b'9' => _value_end += 1,
-                b'\r' | b'\n' | b' ' | b'\t' => break,
-                _ => break,
-            }
-        }
-
-        if _value_end > number_start {
-            if let Ok(value_str) = std::str::from_utf8(&headers[number_start.._value_end]) {
-                return value_str.parse().ok();
-            }
-        }
-    }
-
-    None
-}
-
-// 대소문자 구분 없는 패턴 검색
-fn find_pattern_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.len() > haystack.len() {
-        return None;
-    }
-
-    for i in 0..=haystack.len() - needle.len() {
-        let mut matches = true;
-        for j in 0..needle.len() {
-            let h = haystack[i + j].to_ascii_lowercase();
-            let n = needle[j].to_ascii_lowercase();
-            if h != n {
-                matches = false;
+        // prefix가 PATTERN과 일치하는지 무할당 case-insensitive 비교
+        let line_prefix = &headers[line_start..line_start + PATTERN.len()];
+        let mut matched = true;
+        for j in 0..PATTERN.len() {
+            // PATTERN은 이미 소문자, 입력만 to_ascii_lowercase
+            if line_prefix[j].to_ascii_lowercase() != PATTERN[j] {
+                matched = false;
                 break;
             }
         }
-        if matches {
-            return Some(i);
+
+        if matched {
+            // 값 추출: PATTERN 이후 공백/탭 스킵 → 숫자 슬라이스
+            let mut pos = line_start + PATTERN.len();
+            while pos < line_end && (headers[pos] == b' ' || headers[pos] == b'\t') {
+                pos += 1;
+            }
+            let number_start = pos;
+            while pos < line_end && headers[pos].is_ascii_digit() {
+                pos += 1;
+            }
+            if pos > number_start {
+                // 숫자만 있으므로 from_utf8 안전, 직접 파싱
+                let mut value: usize = 0;
+                for &b in &headers[number_start..pos] {
+                    value = value.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+                }
+                return Some(value);
+            }
+            return None;
         }
+
+        // 다음 라인으로 (line_end가 끝을 가리키면 종료)
+        if line_end >= headers.len() {
+            break;
+        }
+        line_start = line_end + 1;
     }
 
     None
 }
+
+/// httparse 기반 헤더 슬롯 개수.
+/// 일반적인 브라우저 요청은 20개 내외, 여유 있게 64개로 설정.
+const MAX_PARSED_HEADERS: usize = 64;
 
 pub(crate) async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, SendableError> {
     dev_print!("bytes len: {:?}", &bytes.len());
 
-    let (header, bytes) = bytes.as_slice().split_header_body();
-    let headers_string: String = String::from_utf8_lossy(&header).into();
+    // httparse로 헤더 파싱 (zero-copy 슬라이스 반환)
+    let mut builder = Request::builder();
+    let body_start: usize;
+    {
+        let mut headers_buf = [httparse::EMPTY_HEADER; MAX_PARSED_HEADERS];
+        let mut req = httparse::Request::new(&mut headers_buf);
+        let status = req.parse(&bytes)?;
 
-    dev_print!("headers_string: {:?}", &headers_string);
-    dev_print!("headers_string len: {:?}", &headers_string.len());
+        body_start = match status {
+            httparse::Status::Complete(n) => n,
+            // 헤더가 불완전한 경우에도 best-effort로 처리 (기존 동작 유지)
+            httparse::Status::Partial => bytes.len(),
+        };
 
-    let len: usize = bytes.len();
-
-    let mut method_option = None;
-    let mut uri_option = None;
-    let mut version_option = None;
-    let mut headers: Vec<(String, String)> = Vec::new();
-
-    if !headers_string.is_empty() {
-        let line_split = headers_string.split("\r\n");
-
-        line_split.enumerate().for_each(|(index, line)| {
-            dev_print!("{}", line);
-            if line == "" {
-                return;
+        if let Some(m) = req.method {
+            if let Ok(method) = m.parse::<http::Method>() {
+                builder = builder.method(method);
             }
-            if index == 0 {
-                let mut line_split_sub = line.split(" ");
-                match line_split_sub.next() {
-                    Some(method) => {
-                        if let Ok(method) = method.parse::<http::Method>() {
-                            method_option = Some(method);
-                        }
-                    }
-                    None => {
-                        dev_print!("method is None");
-                    }
-                }
-                match line_split_sub.next() {
-                    Some(uri) => {
-                        if let Ok(uri) = uri.parse::<http::Uri>() {
-                            uri_option = Some(uri);
-                        }
-                    }
-                    None => {
-                        dev_print!("uri is None");
-                    }
-                }
-                match line_split_sub.next() {
-                    Some(version) => {
-                        let version = match version {
-                            "HTTP/0.9" => http::Version::HTTP_09,
-                            "HTTP/1.0" => http::Version::HTTP_10,
-                            "HTTP/1.1" => http::Version::HTTP_11,
-                            "HTTP/2.0" => http::Version::HTTP_2,
-                            "HTTP/3.0" => http::Version::HTTP_3,
-                            _ => http::Version::HTTP_11,
-                        };
-                        version_option = Some(version);
-                    }
-                    None => {
-                        version_option = Some(http::Version::HTTP_11);
-                        dev_print!("version is None");
-                    }
-                }
-            } else {
-                let mut size_split = line.trim().split(": ");
-                let key = size_split.next();
-                let value = size_split.next();
-
-                match key.is_some() && value.is_some() {
-                    true => {
-                        headers.push((key.unwrap().to_lowercase().into(), value.unwrap().into()));
-                    }
-                    false => {
-                        dev_print!("key or value is None");
-                    }
-                }
-            }
-        });
-    }
-    let version = match version_option {
-        Some(version) => version,
-        None => http::Version::HTTP_11,
-    };
-
-    let mut request = Request::builder();
-    if headers.len() > 0 {
-        for (key, value) in headers {
-            request = request.header(key, value);
         }
-    }
+        if let Some(p) = req.path {
+            if let Ok(uri) = p.parse::<http::Uri>() {
+                builder = builder.uri(uri);
+            } else {
+                builder = builder.uri("/");
+            }
+        } else {
+            builder = builder.uri("/");
+        }
+        builder = builder.version(match req.version {
+            Some(0) => http::Version::HTTP_10,
+            Some(1) => http::Version::HTTP_11,
+            _ => http::Version::HTTP_11,
+        });
 
-    let request = request
-        .method(match method_option {
-            Some(method) => method,
-            None => http::Method::GET,
-        })
-        .uri(match uri_option {
-            Some(uri) => uri,
-            None => "/".parse()?,
-        })
-        .version(version)
-        .body(Body {
-            body: String::new(),
-            bytes,
-            len,
-            ip: None,
-        })?;
+        // httparse는 빈 슬롯을 끝에 둠 (h.name.is_empty()로 판정)
+        for h in req.headers.iter() {
+            if h.name.is_empty() {
+                break;
+            }
+            // header() 내부에서 HeaderName/HeaderValue로 복사됨 (req drop 안전)
+            builder = builder.header(h.name, h.value);
+        }
+    } // req drop → bytes 차용 해제
+
+    // 바디는 split_off로 복사 없이 분리
+    let mut owned = bytes;
+    let body_bytes = if body_start < owned.len() {
+        owned.split_off(body_start)
+    } else {
+        Vec::new()
+    };
+    let len = body_bytes.len();
+
+    let request = builder.body(Body {
+        body: String::new(),
+        bytes: body_bytes,
+        len,
+        ip: None,
+    })?;
 
     Ok(request)
 }
@@ -709,7 +660,7 @@ pub(crate) async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Sendabl
 pub trait StreamHttpArena {
     async fn parse_request_arena(
         self,
-        options: &Options,
+        options: Arc<Options>,
     ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError>;
 }
 
@@ -718,11 +669,11 @@ pub trait StreamHttpArena {
 impl StreamHttpArena for TcpStream {
     async fn parse_request_arena(
         self,
-        options: &Options,
+        options: Arc<Options>,
     ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
-        let (arena_body, stream) = get_bytes_arena_direct(self, options).await?;
+        let (arena_body, stream) = get_bytes_arena_direct(self, &options).await?;
         let request = parse_http_request_arena(arena_body)?;
 
         Ok(get_parse_result_arena(request, stream, options)?)
@@ -865,66 +816,45 @@ pub(crate) async fn get_bytes_arena_direct(
 pub(crate) fn parse_http_request_arena(
     mut body: ArenaBody,
 ) -> Result<Request<ArenaBody>, SendableError> {
-    let headers_bytes = body.get_headers();
-    let headers_str = std::str::from_utf8(headers_bytes)?;
+    let mut builder = Request::builder();
+    {
+        // get_headers()는 \r\n\r\n 마커를 포함한 헤더 슬라이스를 반환하므로
+        // httparse가 Status::Complete를 반환할 수 있음.
+        let headers_bytes = body.get_headers();
+        let mut headers_buf = [httparse::EMPTY_HEADER; MAX_PARSED_HEADERS];
+        let mut req = httparse::Request::new(&mut headers_buf);
+        let _ = req.parse(headers_bytes)?;
 
-    let mut method_option = None;
-    let mut uri_option = None;
-    let mut version_option = None;
-    let mut headers: Vec<(String, String)> = Vec::new();
-
-    if !headers_str.is_empty() {
-        let lines: Vec<&str> = headers_str.split("\r\n").collect();
-
-        for (index, line) in lines.iter().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-
-            if index == 0 {
-                // 요청 라인 파싱: "GET /path HTTP/1.1"
-                let parts: Vec<&str> = line.split(' ').collect();
-                if let Some(method_str) = parts.get(0) {
-                    if let Ok(method) = method_str.parse::<http::Method>() {
-                        method_option = Some(method);
-                    }
-                }
-                if let Some(uri_str) = parts.get(1) {
-                    if let Ok(uri) = uri_str.parse::<http::Uri>() {
-                        uri_option = Some(uri);
-                    }
-                }
-                if let Some(version_str) = parts.get(2) {
-                    let version = match *version_str {
-                        "HTTP/0.9" => http::Version::HTTP_09,
-                        "HTTP/1.0" => http::Version::HTTP_10,
-                        "HTTP/1.1" => http::Version::HTTP_11,
-                        "HTTP/2.0" => http::Version::HTTP_2,
-                        "HTTP/3.0" => http::Version::HTTP_3,
-                        _ => http::Version::HTTP_11,
-                    };
-                    version_option = Some(version);
-                }
-            } else if let Some(colon_pos) = line.find(": ") {
-                // 헤더 파싱: "Content-Type: application/json"
-                let key = &line[..colon_pos];
-                let value = &line[colon_pos + 2..];
-                headers.push((key.to_lowercase(), value.to_string()));
+        if let Some(m) = req.method {
+            if let Ok(method) = m.parse::<http::Method>() {
+                builder = builder.method(method);
             }
         }
-    }
+        if let Some(p) = req.path {
+            if let Ok(uri) = p.parse::<http::Uri>() {
+                builder = builder.uri(uri);
+            } else {
+                builder = builder.uri("/");
+            }
+        } else {
+            builder = builder.uri("/");
+        }
+        builder = builder.version(match req.version {
+            Some(0) => http::Version::HTTP_10,
+            Some(1) => http::Version::HTTP_11,
+            _ => http::Version::HTTP_11,
+        });
 
-    let mut request_builder = Request::builder()
-        .method(method_option.unwrap_or(http::Method::GET))
-        .uri(uri_option.unwrap_or_else(|| "/".parse().unwrap()))
-        .version(version_option.unwrap_or(http::Version::HTTP_11));
-
-    for (key, value) in headers {
-        request_builder = request_builder.header(key, value);
-    }
+        for h in req.headers.iter() {
+            if h.name.is_empty() {
+                break;
+            }
+            builder = builder.header(h.name, h.value);
+        }
+    } // req drop → body 차용 해제
 
     body.ip = None; // 이후에 설정됨
-    let request = request_builder.body(body)?;
+    let request = builder.body(body)?;
     Ok(request)
 }
 
@@ -932,7 +862,7 @@ pub(crate) fn parse_http_request_arena(
 fn get_parse_result_arena(
     mut request: Request<ArenaBody>,
     stream: TcpStream,
-    options: &Options,
+    options: Arc<Options>,
 ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError> {
     let version = request.version();
     request.body_mut().ip = options.current_client_addr;
@@ -948,7 +878,7 @@ fn get_parse_result_arena(
                 body: String::new(),
                 bytes: vec![],
                 use_file: false,
-                options: options.clone(),
+                options,
             })?,
     ))
 }
@@ -958,7 +888,7 @@ fn get_parse_result_arena(
 pub trait StreamHttpArenaWriter {
     async fn parse_request_arena_writer(
         self,
-        options: &Options,
+        options: Arc<Options>,
     ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError>;
 }
 
@@ -967,11 +897,11 @@ pub trait StreamHttpArenaWriter {
 impl StreamHttpArenaWriter for TcpStream {
     async fn parse_request_arena_writer(
         self,
-        options: &Options,
+        options: Arc<Options>,
     ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
-        let (arena_body, stream) = get_bytes_arena_direct(self, options).await?;
+        let (arena_body, stream) = get_bytes_arena_direct(self, &options).await?;
         let request = parse_http_request_arena(arena_body)?;
 
         Ok(get_parse_result_arena_writer(request, stream, options)?)
@@ -982,7 +912,7 @@ impl StreamHttpArenaWriter for TcpStream {
 pub(crate) fn get_parse_result_arena_writer(
     mut request: Request<ArenaBody>,
     stream: TcpStream,
-    options: &Options,
+    options: Arc<Options>,
 ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
     let version = request.version();
     request.body_mut().ip = options.current_client_addr;
@@ -993,7 +923,7 @@ pub(crate) fn get_parse_result_arena_writer(
             .version(version)
             .header(CONTENT_TYPE, "application/json")
             .status(400)
-            .body(ArenaWriter::new(stream, options.clone()))?,
+            .body(ArenaWriter::new(stream, options))?,
     ))
 }
 

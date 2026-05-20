@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use http::{Request, Response};
 use tokio::io::AsyncWriteExt;
@@ -142,9 +143,9 @@ async fn perform_upgrade(
 /// Otherwise, parses the request normally and returns `Http`.
 pub(crate) async fn try_upgrade(
     stream: TcpStream,
-    options: &Options,
+    options: Arc<Options>,
 ) -> Result<StreamResult, SendableError> {
-    let (bytes, stream) = get_bytes_from_reader(stream, options).await?;
+    let (bytes, stream) = get_bytes_from_reader(stream, &options).await?;
 
     // Find header boundary (\r\n\r\n)
     let header_end = find_header_end_optimized(&bytes)
@@ -173,9 +174,9 @@ pub(crate) async fn try_upgrade(
 #[cfg(feature = "arena")]
 pub(crate) async fn try_upgrade_arena(
     stream: TcpStream,
-    options: &Options,
+    options: Arc<Options>,
 ) -> Result<StreamResultArena, SendableError> {
-    let (arena_body, stream) = get_bytes_arena_direct(stream, options).await?;
+    let (arena_body, stream) = get_bytes_arena_direct(stream, &options).await?;
 
     let peer = options
         .current_client_addr

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use http::Response;
+use std::fmt::Write as _;
 use tokio::io::AsyncWriteExt;
 
 #[cfg(feature = "arena")]
@@ -60,13 +61,13 @@ pub trait ResponseUtil {
 #[async_trait]
 impl ResponseUtil for Response<Writer> {
     async fn responser(&mut self) -> Result<(), SendableError> {
-        let mut send_string = String::new();
+        // 일반적인 응답 헤더 크기 (~512B) 사전 할당으로 재할당 방지
+        let mut send_string = String::with_capacity(512);
         if cfg!(feature = "response_file") && self.body().use_file {
             use http::StatusCode;
             *self.status_mut() = StatusCode::from_u16(200)?;
         }
-        let status_line = format!("{:?} {}\r\n", self.version(), self.status());
-        send_string.push_str(&status_line);
+        write!(send_string, "{:?} {}\r\n", self.version(), self.status())?;
 
         #[cfg(feature = "connection_pool")]
         {
@@ -77,21 +78,19 @@ impl ResponseUtil for Response<Writer> {
             // Keep-alive 설정이 활성화된 경우에만 헤더 추가
             if connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
                 send_string.push_str("Connection: keep-alive\r\n");
-                send_string.push_str(&format!(
+                write!(
+                    send_string,
                     "Keep-Alive: timeout={}, max={}\r\n",
                     connection_config.max_idle_time.as_secs(),
                     connection_config.max_connections_per_host
-                ));
+                )?;
             } else if !connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
                 send_string.push_str("Connection: close\r\n");
             }
         }
 
         if cfg!(feature = "response_file") && self.body().use_file {
-            use tokio::{
-                fs,
-                io::{self, AsyncReadExt},
-            };
+            use tokio::{fs, io::AsyncReadExt};
 
             #[cfg(feature = "response_file")]
             {
@@ -107,27 +106,29 @@ impl ResponseUtil for Response<Writer> {
                 match self.body().body.split('.').last().unwrap() {
                     "zip" => {
                         send_string.push_str("Content-Type: application/zip\r\n");
-                        send_string.push_str(&format!(
+                        write!(
+                            send_string,
                             "content-disposition: attachment; filename={}\r\n",
                             self.body().body
-                        ));
+                        )?;
                     }
                     _ => {
-                        send_string.push_str(&format!(
+                        write!(
+                            send_string,
                             "Content-Type: {}\r\n",
                             get_content_type(&self.body().body)
-                        ));
+                        )?;
                     }
                 }
             }
 
             for (key, value) in self.headers().iter() {
-                send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+                write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
             }
 
-            let file = fs::File::open(&self.body().body).await?;
+            let mut file = fs::File::open(&self.body().body).await?;
             let content_length = file.metadata().await?.len();
-            send_string.push_str(format!("content-length: {}\r\n", content_length).as_str());
+            write!(send_string, "content-length: {}\r\n", content_length)?;
 
             send_string.push_str("\r\n");
 
@@ -135,12 +136,12 @@ impl ResponseUtil for Response<Writer> {
             let body = self.body_mut();
             body.stream.send_bytes(send_string.as_bytes()).await?;
 
-            let mut reader = io::BufReader::new(file);
-            let mut buffer = match content_length < 1048576 * 5 {
-                true => vec![0; content_length as usize],
-                false => vec![0; 1048576 * 5],
-            };
-            while let Ok(len) = reader.read(&mut buffer).await {
+            // 고정 128KB 스트리밍 버퍼 — content_length 기반 통째 할당 대신
+            // TCP burst 한 번에 적합한 크기 + 메모리 사용량 일정.
+            // BufReader는 제거: 128KB 직접 read가 더 빠름 (중간 복사 1단계 절약).
+            const FILE_STREAM_BUF_SIZE: usize = 128 * 1024;
+            let mut buffer = vec![0u8; FILE_STREAM_BUF_SIZE];
+            while let Ok(len) = file.read(&mut buffer).await {
                 if len == 0 {
                     break;
                 }
@@ -148,22 +149,32 @@ impl ResponseUtil for Response<Writer> {
             }
         } else if !self.body().bytes.is_empty() {
             for (key, value) in self.headers().iter() {
-                send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+                write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
             }
             send_string.push_str("\r\n");
-            let mut send_bytes = send_string.as_bytes().to_vec();
-            send_bytes.extend(self.body().bytes.clone());
 
-            // mutable borrow 문제 해결
+            // 헤더 + 바디를 vectored I/O로 한번에 전송 (clone/copy 0회)
             let body = self.body_mut();
-            body.bytes = send_bytes;
-            body.write_bytes().await?;
+            #[cfg(feature = "vectored_io")]
+            {
+                use std::io::IoSlice;
+                let bufs = [
+                    IoSlice::new(send_string.as_bytes()),
+                    IoSlice::new(&body.bytes),
+                ];
+                body.stream.send_vectored(&bufs).await?;
+            }
+            #[cfg(not(feature = "vectored_io"))]
+            {
+                body.stream.send_bytes(send_string.as_bytes()).await?;
+                body.stream.send_bytes(&body.bytes).await?;
+            }
         } else {
             let (body_str, content_string) = get_body(self.body().body.as_str()).await;
             send_string.push_str(&content_string);
 
             for (key, value) in self.headers().iter() {
-                send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+                write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
             }
             crate::dev_print!("headers: {}", &send_string);
             send_string.push_str("\r\n");
@@ -208,19 +219,17 @@ impl ResponseUtil for Response<Writer> {
         match file_path.split('.').last().unwrap() {
             "zip" => {
                 send_string.push_str("Content-Type: application/zip\r\n");
-                send_string.push_str(&format!(
+                write!(
+                    send_string,
                     "content-disposition: attachment; filename={}\r\n",
                     file_path.split('/').last().unwrap_or(file_path)
-                ));
+                )?;
             }
             "json" => {
                 send_string.push_str("Content-Type: application/json\r\n");
             }
             _ => {
-                send_string.push_str(&format!(
-                    "Content-Type: {}\r\n",
-                    get_content_type(file_path)
-                ));
+                write!(send_string, "Content-Type: {}\r\n", get_content_type(file_path))?;
             }
         }
 
@@ -228,11 +237,11 @@ impl ResponseUtil for Response<Writer> {
 
         // 추가 헤더들
         for (key, value) in self.headers().iter() {
-            send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+            write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
         }
 
         // Content-Length와 헤더 끝
-        send_string.push_str(&format!("content-length: {}\r\n", content_length));
+        write!(send_string, "content-length: {}\r\n", content_length)?;
         send_string.push_str("\r\n");
 
         let body = self.body_mut();
@@ -286,15 +295,14 @@ pub trait ResponseUtilArena {
 #[async_trait]
 impl ResponseUtilArena for Response<ArenaWriter> {
     async fn responser_arena(&mut self) -> Result<(), SendableError> {
-        let mut send_string = String::new();
+        let mut send_string = String::with_capacity(512);
 
         if cfg!(feature = "response_file") && self.body().use_file {
             use http::StatusCode;
             *self.status_mut() = StatusCode::from_u16(200)?;
         }
 
-        let status_line = format!("{:?} {}\r\n", self.version(), self.status());
-        send_string.push_str(&status_line);
+        write!(send_string, "{:?} {}\r\n", self.version(), self.status())?;
 
         #[cfg(feature = "connection_pool")]
         {
@@ -305,11 +313,12 @@ impl ResponseUtilArena for Response<ArenaWriter> {
             // Keep-alive 설정이 활성화된 경우에만 헤더 추가
             if connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
                 send_string.push_str("Connection: keep-alive\r\n");
-                send_string.push_str(&format!(
+                write!(
+                    send_string,
                     "Keep-Alive: timeout={}, max={}\r\n",
                     connection_config.max_idle_time.as_secs(),
                     connection_config.max_connections_per_host
-                ));
+                )?;
             } else if !connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
                 send_string.push_str("Connection: close\r\n");
             }
@@ -319,10 +328,7 @@ impl ResponseUtilArena for Response<ArenaWriter> {
             #[cfg(feature = "response_file")]
             {
                 use http::header::CONTENT_TYPE;
-                use tokio::{
-                    fs,
-                    io::{self, AsyncReadExt},
-                };
+                use tokio::{fs, io::AsyncReadExt};
                 self.headers_mut().remove(CONTENT_TYPE);
 
                 if self.body().response_data_len > 0 {
@@ -345,27 +351,24 @@ impl ResponseUtilArena for Response<ArenaWriter> {
                     match file_path.split('.').last().unwrap() {
                         "zip" => {
                             send_string.push_str("Content-Type: application/zip\r\n");
-                            send_string.push_str(&format!(
+                            write!(
+                                send_string,
                                 "content-disposition: attachment; filename={}\r\n",
                                 file_path
-                            ));
+                            )?;
                         }
                         _ => {
-                            send_string.push_str(&format!(
-                                "Content-Type: {}\r\n",
-                                get_content_type(file_path)
-                            ));
+                            write!(send_string, "Content-Type: {}\r\n", get_content_type(file_path))?;
                         }
                     }
 
                     for (key, value) in self.headers().iter() {
-                        send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+                        write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
                     }
 
-                    let file = fs::File::open(file_path).await?;
+                    let mut file = fs::File::open(file_path).await?;
                     let content_length = file.metadata().await?.len();
-                    send_string
-                        .push_str(format!("content-length: {}\r\n", content_length).as_str());
+                    write!(send_string, "content-length: {}\r\n", content_length)?;
 
                     send_string.push_str("\r\n");
 
@@ -373,12 +376,10 @@ impl ResponseUtilArena for Response<ArenaWriter> {
                     let body = self.body_mut();
                     body.stream.send_bytes(send_string.as_bytes()).await?;
 
-                    let mut reader = io::BufReader::new(file);
-                    let mut buffer = match content_length < 1048576 * 5 {
-                        true => vec![0; content_length as usize],
-                        false => vec![0; 1048576 * 5],
-                    };
-                    while let Ok(len) = reader.read(&mut buffer).await {
+                    // 고정 128KB 스트리밍 버퍼 (responser와 동일 정책)
+                    const FILE_STREAM_BUF_SIZE: usize = 128 * 1024;
+                    let mut buffer = vec![0u8; FILE_STREAM_BUF_SIZE];
+                    while let Ok(len) = file.read(&mut buffer).await {
                         if len == 0 {
                             break;
                         }
@@ -390,12 +391,10 @@ impl ResponseUtilArena for Response<ArenaWriter> {
             if self.body().response_data_len > 0 {
                 // Arena 메모리로 할당된 응답 데이터 사용
                 for (key, value) in self.headers().iter() {
-                    send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+                    write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
                 }
 
-                let content_length =
-                    format!("content-length: {}\r\n", self.body().response_data_len);
-                send_string.push_str(&content_length);
+                write!(send_string, "content-length: {}\r\n", self.body().response_data_len)?;
                 send_string.push_str("\r\n");
 
                 // mutable borrow 문제 해결: body_mut()을 한 번만 호출
@@ -431,7 +430,7 @@ impl ResponseUtilArena for Response<ArenaWriter> {
             } else {
                 // 빈 응답
                 for (key, value) in self.headers().iter() {
-                    send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+                    write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
                 }
                 send_string.push_str("content-length: 0\r\n");
                 send_string.push_str("\r\n");
@@ -479,29 +478,27 @@ impl ResponseUtilArena for Response<ArenaWriter> {
         match file_path.split('.').last().unwrap() {
             "zip" => {
                 send_string.push_str("Content-Type: application/zip\r\n");
-                send_string.push_str(&format!(
+                write!(
+                    send_string,
                     "content-disposition: attachment; filename={}\r\n",
                     file_path.split('/').last().unwrap_or(file_path)
-                ));
+                )?;
             }
             "json" => {
                 send_string.push_str("Content-Type: application/json\r\n");
             }
             _ => {
-                send_string.push_str(&format!(
-                    "Content-Type: {}\r\n",
-                    get_content_type(file_path)
-                ));
+                write!(send_string, "Content-Type: {}\r\n", get_content_type(file_path))?;
             }
         }
 
         // 추가 헤더들
         for (key, value) in self.headers().iter() {
-            send_string.push_str(&format!("{}: {}\r\n", key.as_str(), value.to_str()?));
+            write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
         }
 
         // Content-Length와 헤더 끝
-        send_string.push_str(&format!("content-length: {}\r\n", content_length));
+        write!(send_string, "content-length: {}\r\n", content_length)?;
         send_string.push_str("\r\n");
 
         // mutable borrow 문제 해결: body_mut()을 한 번만 호출
