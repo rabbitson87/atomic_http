@@ -1,5 +1,13 @@
 # Changes
 
+## 0.13.0
+
+* Move `current_client_addr` from `Options` to `Accept.peer`; `Server.options` is now a shared `Arc<Options>` (use `server.options_mut()` for in-place edits).
+* `SplitBytes::split_bytes` returns `Vec<&[u8]>` instead of `Vec<Vec<u8>>` (no per-part copy in non-arena multipart).
+* Header read loop starts at 4 KB and grows progressively instead of forcing a 64 KB zero-init on every request.
+* Rewrite `parse_upgrade_request` on top of `httparse`.
+* Consolidate three `find_header_end` implementations into a single SIMD/scalar-aware function in `bytes`.
+
 ## 0.12.0
 
 * Reduce per-request allocations across HTTP parsing, multipart, response, and file cache (multipart 1.3–1.7×, 1 MB cache hit 10.7× faster).

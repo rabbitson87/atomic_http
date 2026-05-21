@@ -28,7 +28,11 @@ fn build_multipart_body(num_parts: usize, body_size: usize) -> Vec<u8> {
             buf.extend_from_slice(b"\r\n");
         } else {
             buf.extend_from_slice(
-                format!("Content-Disposition: form-data; name=\"field{}\"\r\n\r\n", i).as_bytes(),
+                format!(
+                    "Content-Disposition: form-data; name=\"field{}\"\r\n\r\n",
+                    i
+                )
+                .as_bytes(),
             );
             buf.extend(std::iter::repeat(b'x').take(body_size));
             buf.extend_from_slice(b"\r\n");
@@ -64,14 +68,18 @@ fn bench_multipart(c: &mut Criterion) {
 
     for &(parts, size) in &[(2usize, 256usize), (8, 1024), (16, 4096)] {
         let label = format!("{}parts_{}B", parts, size);
-        group.bench_with_input(BenchmarkId::from_parameter(&label), &(parts, size), |b, &(p, s)| {
-            let body_bytes = build_multipart_body(p, s);
-            b.iter(|| {
-                let mut req = build_request(body_bytes.clone());
-                let form = rt.block_on(req.get_multi_part()).unwrap();
-                black_box(form);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(&label),
+            &(parts, size),
+            |b, &(p, s)| {
+                let body_bytes = build_multipart_body(p, s);
+                b.iter(|| {
+                    let mut req = build_request(body_bytes.clone());
+                    let form = rt.block_on(req.get_multi_part()).unwrap();
+                    black_box(form);
+                });
+            },
+        );
     }
     group.finish();
 }

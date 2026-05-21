@@ -2,6 +2,7 @@ use crate::dev_print;
 use async_trait::async_trait;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{self, AsyncReadExt};
@@ -303,6 +304,7 @@ pub trait StreamHttp {
     async fn parse_request(
         self,
         options: Arc<Options>,
+        peer: SocketAddr,
     ) -> Result<(Request<Body>, Response<Writer>), SendableError>;
 }
 
@@ -311,6 +313,7 @@ impl StreamHttp for TcpStream {
     async fn parse_request(
         self,
         options: Arc<Options>,
+        peer: SocketAddr,
     ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
@@ -318,7 +321,9 @@ impl StreamHttp for TcpStream {
 
         let request = get_request(bytes).await?;
 
-        Ok(get_parse_result_from_request(request, stream, options)?)
+        Ok(get_parse_result_from_request(
+            request, stream, options, peer,
+        )?)
     }
 }
 
@@ -328,6 +333,7 @@ impl StreamHttp for TlsStream<TcpStream> {
     async fn parse_request(
         self,
         options: Arc<Options>,
+        peer: SocketAddr,
     ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
         let stream = self.into_inner().0;
         stream.set_nodelay(options.no_delay)?;
@@ -336,7 +342,9 @@ impl StreamHttp for TlsStream<TcpStream> {
 
         let request = get_request(bytes).await?;
 
-        Ok(get_parse_result_from_request(request, stream, options)?)
+        Ok(get_parse_result_from_request(
+            request, stream, options, peer,
+        )?)
     }
 }
 
@@ -344,9 +352,10 @@ pub(crate) fn get_parse_result_from_request(
     mut request: Request<Body>,
     stream: TcpStream,
     options: Arc<Options>,
+    peer: SocketAddr,
 ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
     let version = request.version();
-    request.body_mut().ip = options.current_client_addr;
+    request.body_mut().ip = Some(peer);
 
     Ok((
         request,
@@ -367,27 +376,37 @@ pub(crate) async fn get_bytes_from_reader(
     mut stream: TcpStream,
     options: &Options,
 ) -> Result<(Vec<u8>, TcpStream), SendableError> {
-    const MAX_HEADER_SIZE: usize = 64 * 1024; // 64KB 헤더 제한
-    const INITIAL_READ_SIZE: usize = 4096; // 첫 읽기 크기
+    const MAX_HEADER_SIZE: usize = 64 * 1024; // 64KB 헤더 cap (RFC 표준 헤더 한도)
+    const INITIAL_READ_SIZE: usize = 4096; // 첫 읽기 4KB
     const HEADER_END_MARKER: &[u8] = b"\r\n\r\n";
 
-    let buffer_size = match options.read_buffer_size {
+    // 사용자 설정값이 있으면 그것을 첫 읽기로, 아니면 4KB.
+    // MAX_HEADER_SIZE는 cap에만 사용 (이전: min으로도 작동해 매 요청 64KB zero-init).
+    let initial_read = match options.read_buffer_size {
         0 => INITIAL_READ_SIZE,
-        _ => options.read_buffer_size,
-    }
-    .max(MAX_HEADER_SIZE);
+        n => n,
+    };
 
-    // 1단계: 작은 버퍼로 헤더 먼저 읽기
-    let mut header_buffer = Vec::with_capacity(buffer_size);
+    // 1단계: 점진적 grow로 헤더 읽기 (작은 요청은 4KB 1회로 끝)
+    let mut header_buffer: Vec<u8> = Vec::with_capacity(initial_read);
     let mut content_length = None;
     let mut header_end_pos = None;
     let mut retry_count = 0;
     let max_retry = options.read_max_retry;
     let read_timeout = Duration::from_millis(options.read_timeout_miliseconds);
 
-    while header_end_pos.is_none() && header_buffer.len() < buffer_size && retry_count < max_retry {
+    while header_end_pos.is_none()
+        && header_buffer.len() < MAX_HEADER_SIZE
+        && retry_count < max_retry
+    {
         let current_len = header_buffer.len();
-        header_buffer.resize(current_len + buffer_size, 0);
+        let chunk = if current_len == 0 {
+            initial_read
+        } else {
+            determine_next_read_size(current_len)
+        };
+        let new_size = (current_len + chunk).min(MAX_HEADER_SIZE);
+        header_buffer.resize(new_size, 0);
 
         match tokio::time::timeout(read_timeout, stream.read(&mut header_buffer[current_len..]))
             .await
@@ -447,11 +466,12 @@ pub(crate) async fn get_bytes_from_reader(
         header_buffer
     };
 
-    // 3단계: 남은 바디 데이터 읽기
+    // 3단계: 남은 바디 데이터 읽기 (남은 만큼 한 번에 가져가기)
+    const BODY_READ_CHUNK: usize = 64 * 1024;
     let mut total_read = final_buffer.len();
     while total_read < total_expected_size && retry_count < options.read_max_retry {
         let remaining = total_expected_size - total_read;
-        let chunk_size = remaining.min(buffer_size);
+        let chunk_size = remaining.min(BODY_READ_CHUNK);
 
         // 필요하면 버퍼 확장
         if final_buffer.len() < total_read + chunk_size {
@@ -490,7 +510,7 @@ pub(crate) async fn get_bytes_from_reader(
     Ok((final_buffer, stream))
 }
 
-#[cfg(feature = "arena")]
+/// 헤더 읽기 시 다음 read 청크 크기. 점진 grow로 작은 요청은 4KB 1회로 끝.
 fn determine_next_read_size(current_size: usize) -> usize {
     match current_size {
         0..=512 => 1024,      // 작은 헤더: 1KB 단위
@@ -500,34 +520,9 @@ fn determine_next_read_size(current_size: usize) -> usize {
     }
 }
 
-// ✅ 간단하고 빠른 헤더 끝 찾기 (SIMD 없이도 충분히 빠름)
-pub(crate) fn find_header_end_optimized(data: &[u8]) -> Option<usize> {
-    if data.len() < 4 {
-        return None;
-    }
-
-    // 최적화된 단순 검색 - 대부분의 경우 충분히 빠릅니다
-    let mut i = 0;
-    while i <= data.len() - 4 {
-        // 4바이트를 한 번에 비교 (컴파일러가 최적화)
-        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n'
-        {
-            return Some(i);
-        }
-
-        // 첫 번째 바이트가 \r이 아니면 빠르게 스킵
-        if data[i] != b'\r' {
-            // \r을 찾을 때까지 빠르게 이동
-            while i < data.len() && data[i] != b'\r' {
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    None
-}
+// 헤더 끝 찾기는 `bytes::find_header_end`로 통합됨.
+// 기존 외부 호출자(websocket.rs)는 이 모듈에서 임포트 가능하도록 re-export 유지.
+pub(crate) use crate::helpers::traits::bytes::find_header_end as find_header_end_optimized;
 
 // ✅ Content-Length 추출 — 라인 단위 스캔 (O(n))
 // HTTP 헤더는 \r\n 구분이므로 각 라인의 시작 위치에서만 prefix 비교.
@@ -661,6 +656,7 @@ pub trait StreamHttpArena {
     async fn parse_request_arena(
         self,
         options: Arc<Options>,
+        peer: SocketAddr,
     ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError>;
 }
 
@@ -670,13 +666,14 @@ impl StreamHttpArena for TcpStream {
     async fn parse_request_arena(
         self,
         options: Arc<Options>,
+        peer: SocketAddr,
     ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
         let (arena_body, stream) = get_bytes_arena_direct(self, &options).await?;
         let request = parse_http_request_arena(arena_body)?;
 
-        Ok(get_parse_result_arena(request, stream, options)?)
+        Ok(get_parse_result_arena(request, stream, options, peer)?)
     }
 }
 
@@ -688,17 +685,17 @@ pub(crate) async fn get_bytes_arena_direct(
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     const MAX_HEADER_SIZE: usize = 64 * 1024;
-    const INITIAL_ARENA_SIZE: usize = 8192;
+    const INITIAL_ARENA_SIZE: usize = 4096;
     const HEADER_END_MARKER: &[u8] = b"\r\n\r\n";
 
-    let buffer_size = match options.read_buffer_size {
+    // 첫 읽기 크기만 사용자 설정 반영, 64KB 강제 cap 제거 (사전 malloc 회피).
+    let initial_read = match options.read_buffer_size {
         0 => INITIAL_ARENA_SIZE,
-        _ => options.read_buffer_size,
-    }
-    .max(MAX_HEADER_SIZE);
+        n => n,
+    };
 
     // 1단계: 헤더만 먼저 읽어서 Content-Length 파악
-    let mut temp_header_buf = Vec::with_capacity(buffer_size);
+    let mut temp_header_buf: Vec<u8> = Vec::with_capacity(initial_read);
     let mut header_end_pos = None;
     let mut content_length = None;
     let mut retry_count = 0;
@@ -706,7 +703,9 @@ pub(crate) async fn get_bytes_arena_direct(
     let read_timeout = Duration::from_millis(options.read_timeout_miliseconds);
 
     // 헤더 읽기 및 파싱
-    while header_end_pos.is_none() && temp_header_buf.len() < buffer_size && retry_count < max_retry
+    while header_end_pos.is_none()
+        && temp_header_buf.len() < MAX_HEADER_SIZE
+        && retry_count < max_retry
     {
         let next_chunk_size = determine_next_read_size(temp_header_buf.len());
         let current_len = temp_header_buf.len();
@@ -769,9 +768,16 @@ pub(crate) async fn get_bytes_arena_direct(
     let mut total_read = final_buffer.len();
     retry_count = 0;
 
+    // 바디 읽기 청크 (read_buffer_size=0인 경우 0-byte read로 무한 루프 방지)
+    const BODY_READ_CHUNK: usize = 64 * 1024;
+    let body_chunk = if options.read_buffer_size == 0 {
+        BODY_READ_CHUNK
+    } else {
+        options.read_buffer_size
+    };
     while total_read < total_size && retry_count < options.read_max_retry {
         let remaining = total_size - total_read;
-        let chunk_size = remaining.min(options.read_buffer_size);
+        let chunk_size = remaining.min(body_chunk);
 
         if final_buffer.len() < total_read + chunk_size {
             final_buffer.resize(total_read + chunk_size, 0);
@@ -863,9 +869,10 @@ fn get_parse_result_arena(
     mut request: Request<ArenaBody>,
     stream: TcpStream,
     options: Arc<Options>,
+    peer: SocketAddr,
 ) -> Result<(Request<ArenaBody>, Response<Writer>), SendableError> {
     let version = request.version();
-    request.body_mut().ip = options.current_client_addr;
+    request.body_mut().ip = Some(peer);
 
     Ok((
         request,
@@ -889,6 +896,7 @@ pub trait StreamHttpArenaWriter {
     async fn parse_request_arena_writer(
         self,
         options: Arc<Options>,
+        peer: SocketAddr,
     ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError>;
 }
 
@@ -898,13 +906,16 @@ impl StreamHttpArenaWriter for TcpStream {
     async fn parse_request_arena_writer(
         self,
         options: Arc<Options>,
+        peer: SocketAddr,
     ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
         self.set_nodelay(options.no_delay)?;
 
         let (arena_body, stream) = get_bytes_arena_direct(self, &options).await?;
         let request = parse_http_request_arena(arena_body)?;
 
-        Ok(get_parse_result_arena_writer(request, stream, options)?)
+        Ok(get_parse_result_arena_writer(
+            request, stream, options, peer,
+        )?)
     }
 }
 
@@ -913,9 +924,10 @@ pub(crate) fn get_parse_result_arena_writer(
     mut request: Request<ArenaBody>,
     stream: TcpStream,
     options: Arc<Options>,
+    peer: SocketAddr,
 ) -> Result<(Request<ArenaBody>, Response<ArenaWriter>), SendableError> {
     let version = request.version();
-    request.body_mut().ip = options.current_client_addr;
+    request.body_mut().ip = Some(peer);
 
     Ok((
         request,

@@ -43,14 +43,7 @@ impl StringUtil for String {
     }
 }
 
-pub fn find_header_end_optimized(data: &[u8]) -> Option<usize> {
-    data.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-pub fn extract_content_length_fast(headers: &[u8]) -> Option<usize> {
-    let headers_str = std::str::from_utf8(headers).ok()?;
-    headers_str
-        .lines()
-        .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
-        .and_then(|line| line.split(':').nth(1)?.trim().parse().ok())
-}
+// 헤더 끝 찾기와 Content-Length 추출은 `bytes::find_header_end` 와
+// `http_stream::extract_content_length_simple` 로 통합되었습니다.
+// 외부 호환을 위해 thin wrapper만 유지.
+pub use crate::helpers::traits::bytes::find_header_end as find_header_end_optimized;

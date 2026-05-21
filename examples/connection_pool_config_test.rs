@@ -22,9 +22,9 @@ async fn run_configurable_server(port: u16, server_ready: Arc<Notify>, keep_aliv
                 .idle_timeout(60) // 60초 (nginx 기본값: 75)
                 .max_connections_per_host(16) // 16개 연결
                 .keep_alive(true);
-            server.options.set_connection_option(config);
+            server.options_mut().set_connection_option(config);
         } else {
-            server.options.disable_connection_pool();
+            server.options_mut().disable_connection_pool();
         }
 
         let connection_config = server.options.get_connection_option();

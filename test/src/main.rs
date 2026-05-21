@@ -32,7 +32,7 @@ async fn main() {
         match server.accept().await {
             Ok(accept) => {
                 tokio::spawn(async move {
-                    let ip = accept.option.get_request_ip();
+                    let ip = accept.get_request_ip();
                     println!("ip: {:?}", ip);
 
                     match accept.stream_parse_arena().await {

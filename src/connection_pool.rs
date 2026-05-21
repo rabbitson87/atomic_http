@@ -242,7 +242,10 @@ impl ConnectionPool {
         });
 
         // 기존 작업이 있다면 중단하고 교체
-        let mut slot = self.cleanup_handle.lock().expect("cleanup_handle mutex poisoned");
+        let mut slot = self
+            .cleanup_handle
+            .lock()
+            .expect("cleanup_handle mutex poisoned");
         if let Some(prev) = slot.take() {
             prev.abort();
         }

@@ -82,7 +82,10 @@ pub type SendableError = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct Server {
     pub listener: TcpListener,
-    pub options: Options,
+    /// 공유 옵션. 요청마다 `Arc::clone`만 하면 됨 (full clone 없음).
+    /// 설정 변경 시 `Arc::make_mut`로 단일 소유일 때만 in-place 수정,
+    /// 공유 중이면 자동으로 copy-on-write.
+    pub options: Arc<Options>,
     #[cfg(feature = "connection_pool")]
     pub connection_pool: Option<Arc<ConnectionPool>>,
 }
@@ -95,7 +98,6 @@ pub struct Options {
     pub read_buffer_size: usize,
     pub read_max_retry: u8,
     pub read_imcomplete_size: usize,
-    pub current_client_addr: Option<SocketAddr>,
     pub zero_copy_threshold: usize,
     pub enable_file_cache: bool,
 
@@ -113,7 +115,6 @@ impl Options {
             read_buffer_size: 4096,
             read_max_retry: 3,
             read_imcomplete_size: 0,
-            current_client_addr: None,
             zero_copy_threshold: 1024 * 1024, // 1MB 이상 파일에 제로카피 적용
             enable_file_cache: true,
 
@@ -210,13 +211,6 @@ impl Options {
         _options
     }
 
-    pub fn get_request_ip(&self) -> String {
-        match &self.current_client_addr {
-            Some(addr) => addr.ip().to_string(),
-            None => "".into(),
-        }
-    }
-
     pub fn set_zero_copy_threshold(&mut self, threshold: usize) {
         self.zero_copy_threshold = threshold;
     }
@@ -263,7 +257,7 @@ impl Server {
 
         let mut server = Server {
             listener: TcpListener::bind(address).await?,
-            options: Options::new(),
+            options: Arc::new(Options::new()),
             #[cfg(feature = "connection_pool")]
             connection_pool: None,
         };
@@ -285,7 +279,7 @@ impl Server {
 
         let mut server = Server {
             listener: TcpListener::bind(address).await?,
-            options,
+            options: Arc::new(options),
             #[cfg(feature = "connection_pool")]
             connection_pool: None,
         };
@@ -299,6 +293,12 @@ impl Server {
         }
 
         Ok(server)
+    }
+
+    /// 단일 소유 상태일 때만 in-place 수정. 공유 중이면 copy-on-write.
+    /// 서버 설정은 일반적으로 요청 처리 시작 전에 끝나므로 대부분 in-place.
+    pub fn options_mut(&mut self) -> &mut Options {
+        Arc::make_mut(&mut self.options)
     }
 
     /// Create server with connection pool configuration (legacy method)
@@ -378,13 +378,12 @@ impl Server {
                 return Err(e.into());
             }
         };
-        self.options.current_client_addr = Some(addr);
-        // Options를 Arc로 한 번 감싸서 Accept/Writer 핸드오프 비용을 atomic increment로 축소.
-        Ok(Accept::new(stream, Arc::new(self.options.clone())))
+        // Options는 이미 Arc — 요청마다 atomic increment 1회. peer는 Accept에 별도 저장.
+        Ok(Accept::new(stream, Arc::clone(&self.options), addr))
     }
 
     pub fn set_no_delay(&mut self, no_delay: bool) {
-        self.options.no_delay = no_delay;
+        self.options_mut().no_delay = no_delay;
     }
 
     /// 캐시 통계 출력
@@ -397,27 +396,46 @@ impl Server {
 pub struct Accept {
     pub tcp_stream: TcpStream,
     pub option: Arc<Options>,
+    /// 요청 송신자 주소. 요청별 값이므로 Options와 분리하여 여기에 보관.
+    pub peer: SocketAddr,
 }
 
 impl Accept {
-    pub fn new(tcp_stream: TcpStream, option: Arc<Options>) -> Self {
-        Self { tcp_stream, option }
+    pub fn new(tcp_stream: TcpStream, option: Arc<Options>, peer: SocketAddr) -> Self {
+        Self {
+            tcp_stream,
+            option,
+            peer,
+        }
+    }
+
+    /// 요청 클라이언트의 IP 주소를 문자열로 반환 (`Options::get_request_ip` 대체).
+    pub fn get_request_ip(&self) -> String {
+        self.peer.ip().to_string()
+    }
+
+    /// 요청 클라이언트의 SocketAddr 반환.
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.peer
     }
 
     pub async fn parse_request(self) -> Result<(Request<Body>, Response<Writer>), SendableError> {
-        Ok(self.tcp_stream.parse_request(self.option).await?)
+        Ok(self
+            .tcp_stream
+            .parse_request(self.option, self.peer)
+            .await?)
     }
 
     #[cfg(feature = "websocket")]
     pub async fn stream_parse(self) -> Result<StreamResult, SendableError> {
         self.tcp_stream.set_nodelay(self.option.no_delay)?;
-        websocket::try_upgrade(self.tcp_stream, self.option).await
+        websocket::try_upgrade(self.tcp_stream, self.option, self.peer).await
     }
 
     #[cfg(all(feature = "websocket", feature = "arena"))]
     pub async fn stream_parse_arena(self) -> Result<StreamResultArena, SendableError> {
         self.tcp_stream.set_nodelay(self.option.no_delay)?;
-        websocket::try_upgrade_arena(self.tcp_stream, self.option).await
+        websocket::try_upgrade_arena(self.tcp_stream, self.option, self.peer).await
     }
 
     #[cfg(feature = "arena")]
@@ -428,7 +446,7 @@ impl Accept {
 
         Ok(self
             .tcp_stream
-            .parse_request_arena_writer(self.option)
+            .parse_request_arena_writer(self.option, self.peer)
             .await?)
     }
 }

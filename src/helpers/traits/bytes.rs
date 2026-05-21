@@ -1,6 +1,22 @@
 pub trait SplitBytes {
-    fn split_bytes(&self, delimiter: &[u8]) -> Vec<Vec<u8>>;
+    /// 슬라이스를 delimiter로 분할하여 부분 슬라이스를 반환 (할당 없음).
+    /// 끝의 multipart 종료 마커 `--\r\n`은 결과에서 제외.
+    fn split_bytes<'a>(&'a self, delimiter: &[u8]) -> Vec<&'a [u8]>;
     fn split_header_body(&self) -> (Vec<u8>, Vec<u8>);
+}
+
+/// HTTP 헤더 끝(`\r\n\r\n`) 위치를 찾는 통합 진입점.
+/// `simd` 피쳐 활성 시 SSE2/AVX2 fast-path, 미활성 시 스칼라.
+/// 반환 위치는 `\r\n\r\n`의 첫 `\r` 인덱스.
+pub fn find_header_end(data: &[u8]) -> Option<usize> {
+    #[cfg(feature = "simd")]
+    {
+        return simd::find_header_end_simd(data);
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        data.windows(4).position(|w| w == b"\r\n\r\n")
+    }
 }
 
 #[cfg(feature = "simd")]
@@ -18,8 +34,22 @@ mod simd {
 
         let pattern = [b'\r', b'\n', b'\r', b'\n'];
         let _pattern_vec = _mm_set_epi8(
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            pattern[3] as i8, pattern[2] as i8, pattern[1] as i8, pattern[0] as i8
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            pattern[3] as i8,
+            pattern[2] as i8,
+            pattern[1] as i8,
+            pattern[0] as i8,
         );
 
         let mut i = 0;
@@ -47,8 +77,7 @@ mod simd {
         }
 
         // 남은 부분은 스칼라로 처리
-        find_header_end_scalar(&data[i..])
-            .map(|pos| pos + i)
+        find_header_end_scalar(&data[i..]).map(|pos| pos + i)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -85,18 +114,14 @@ mod simd {
         }
 
         // 남은 부분은 SSE2로 처리
-        find_header_end_sse2(&data[i..])
-            .map(|pos| pos + i)
+        find_header_end_sse2(&data[i..]).map(|pos| pos + i)
     }
 
     fn find_header_end_scalar(data: &[u8]) -> Option<usize> {
-        let pattern = b"\r\n\r\n";
-        for i in 0..=data.len().saturating_sub(4) {
-            if &data[i..i + 4] == pattern {
-                return Some(i);
-            }
+        if data.len() < 4 {
+            return None;
         }
-        None
+        data.windows(4).position(|w| w == b"\r\n\r\n")
     }
 
     pub fn find_header_end_simd(data: &[u8]) -> Option<usize> {
@@ -114,61 +139,45 @@ mod simd {
     }
 }
 
-impl SplitBytes for &[u8] {
-    fn split_bytes(&self, delimiter: &[u8]) -> Vec<Vec<u8>> {
+impl SplitBytes for [u8] {
+    fn split_bytes<'a>(&'a self, delimiter: &[u8]) -> Vec<&'a [u8]> {
+        // 슬라이스 기반 분할 — 각 파트는 입력의 부분 슬라이스 (복사 없음).
+        // 동일 위치 다중 매치는 발생하지 않으므로 i를 delimiter.len()만큼 진행.
         let mut result = Vec::new();
+        if delimiter.is_empty() || self.len() < delimiter.len() {
+            return result;
+        }
         let mut start = 0;
-        for (i, _) in self.iter().enumerate() {
-            if self[i..].starts_with(delimiter) {
-                let bytes = self[start..i].to_vec();
-                if bytes.len() > 0 {
-                    result.push(bytes);
+        let mut i = 0;
+        let end = self.len() - delimiter.len();
+        while i <= end {
+            if &self[i..i + delimiter.len()] == delimiter {
+                let part = &self[start..i];
+                if !part.is_empty() {
+                    result.push(part);
                 }
-                start = i + delimiter.len();
+                i += delimiter.len();
+                start = i;
+            } else {
+                i += 1;
             }
         }
-        let last = self[start..].to_vec();
-        if [45, 45, 13, 10] != last.as_slice() && last.len() > 0 {
+        // 마지막 segment: multipart 종료 마커 `--\r\n` 은 제외
+        let last = &self[start..];
+        if !last.is_empty() && last != b"--\r\n" {
             result.push(last);
         }
         result
     }
 
     fn split_header_body(&self) -> (Vec<u8>, Vec<u8>) {
-        #[cfg(feature = "simd")]
-        {
-            if let Some(pos) = simd::find_header_end_simd(self) {
-                let header = self[..pos].to_vec();
-                let body = self[pos + 4..].to_vec();
-                return (header, body);
-            }
+        // 통합 find_header_end 재사용 — simd/scalar 분기는 한 곳에서.
+        if let Some(pos) = find_header_end(self) {
+            (self[..pos].to_vec(), self[pos + 4..].to_vec())
+        } else {
+            // 마커를 찾지 못한 경우 전체를 헤더로 처리
+            (self.to_vec(), Vec::new())
         }
-
-        #[cfg(not(feature = "simd"))]
-        {
-            // 기존 스칼라 방식
-            let mut header = Vec::new();
-            let mut body = Vec::new();
-            let mut is_header = true;
-            let mut count = 0;
-            for (i, _) in self.iter().enumerate() {
-                if self[i..].starts_with(b"\r\n\r\n") {
-                    is_header = false;
-                }
-                if is_header {
-                    header.push(self[i]);
-                } else {
-                    if count > 3 {
-                        body.push(self[i]);
-                    }
-                    count += 1;
-                }
-            }
-            return (header, body);
-        }
-
-        // 패턴을 찾지 못한 경우 전체를 헤더로 처리
-        (self.to_vec(), Vec::new())
     }
 }
 

@@ -1,10 +1,10 @@
+use crate::dev_print;
 use dashmap::DashMap;
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
-use crate::dev_print;
 
 use crate::SendableError;
 
@@ -21,7 +21,7 @@ impl ZeroCopyFile {
         let file = File::open(path.as_ref())?;
         let metadata = file.metadata()?;
         let file_size = metadata.len() as usize;
-        
+
         // 빈 파일 처리
         if file_size == 0 {
             return Err("Cannot memory map empty file".into());
@@ -76,8 +76,11 @@ impl ZeroCopyFile {
         if end > self.mmap.len() || start > end {
             return Err(format!(
                 "Index out of bounds: start={}, end={}, len={}",
-                start, end, self.mmap.len()
-            ).into());
+                start,
+                end,
+                self.mmap.len()
+            )
+            .into());
         }
         Ok(&self.mmap[start..end])
     }
@@ -209,10 +212,10 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            max_cache_files: 50,                    // 최대 50개 파일
-            max_cache_file_size: 1024 * 1024,      // 1MB 이하 파일만 메모리 캐시
+            max_cache_files: 50,                      // 최대 50개 파일
+            max_cache_file_size: 1024 * 1024,         // 1MB 이하 파일만 메모리 캐시
             total_cache_size_limit: 50 * 1024 * 1024, // 총 50MB 캐시 제한
-            cache_duration: Duration::from_secs(300),  // 5분 캐시 유지
+            cache_duration: Duration::from_secs(300), // 5분 캐시 유지
         }
     }
 }
@@ -224,7 +227,7 @@ pub struct ZeroCopyCache {
     // 작은 파일들의 메모리 캐시
     memory_cache: Arc<DashMap<PathBuf, CachedFileData>>,
     max_cache_files: usize,
-    max_cache_file_size: usize,  // 이 크기 이하만 메모리 캐시
+    max_cache_file_size: usize, // 이 크기 이하만 메모리 캐시
     cache_duration: Duration,
     total_cache_size_limit: usize,
 }
@@ -237,7 +240,7 @@ impl ZeroCopyCache {
         max_cache_files: usize,
         max_cache_file_size: usize,
         total_cache_size_limit: usize,
-        cache_duration: Duration
+        cache_duration: Duration,
     ) -> Self {
         Self {
             memory_cache: Arc::new(DashMap::new()),
@@ -268,7 +271,8 @@ impl ZeroCopyCache {
         let cache_config = config.unwrap_or_default();
         let cache = Self::from_config(cache_config);
 
-        GLOBAL_CACHE.set(cache)
+        GLOBAL_CACHE
+            .set(cache)
             .map_err(|_| "Global cache already initialized")
     }
 
@@ -279,34 +283,45 @@ impl ZeroCopyCache {
 
     /// 파일을 로드 (캐시 사용 또는 직접 로드)
     pub fn load_file<P: AsRef<Path>>(&self, path: P) -> Result<FileLoadResult, SendableError> {
-
         let path_buf = path.as_ref().to_path_buf();
-        
+
         // 파일 크기 확인
         let metadata = std::fs::metadata(&path_buf)?;
         let file_size = metadata.len() as usize;
-        
+
         // 작은 파일: 메모리 캐시 사용
         if file_size <= self.max_cache_file_size {
             let modified_time = metadata.modified().unwrap_or_else(|_| SystemTime::now());
             return self.load_from_memory_cache(path_buf, file_size, modified_time);
         }
-        
+
         // 큰 파일: 직접 memmap2 사용 (캐시 안함)
-        dev_print!("Large file detected ({}MB), using direct memmap", file_size / (1024 * 1024));
+        dev_print!(
+            "Large file detected ({}MB), using direct memmap",
+            file_size / (1024 * 1024)
+        );
         let zero_copy_file = ZeroCopyFile::new(&path_buf)?;
         Ok(FileLoadResult::DirectMemoryMap(zero_copy_file))
     }
 
     /// 메모리 캐시에서 파일 로드
-    fn load_from_memory_cache(&self, path_buf: PathBuf, file_size: usize, modified_time: SystemTime) -> Result<FileLoadResult, SendableError> {
+    fn load_from_memory_cache(
+        &self,
+        path_buf: PathBuf,
+        file_size: usize,
+        modified_time: SystemTime,
+    ) -> Result<FileLoadResult, SendableError> {
         // 캐시에서 먼저 찾기 — Arc::clone은 atomic increment 1회 (실제 데이터 복사 없음)
         {
             if let Some(mut cached_data) = self.memory_cache.get_mut(&path_buf) {
                 // 파일 수정 시간 비교: 변경되지 않았으면 캐시 사용
                 if cached_data.modified_time == modified_time {
                     cached_data.update_access_time();
-                    dev_print!("File loaded from memory cache: {:?} ({}KB)", path_buf, file_size / 1024);
+                    dev_print!(
+                        "File loaded from memory cache: {:?} ({}KB)",
+                        path_buf,
+                        file_size / 1024
+                    );
                     return Ok(FileLoadResult::MemoryCache(Arc::clone(&cached_data.data)));
                 }
                 // 파일이 변경됨 → guard drop 후 재로드
@@ -316,10 +331,15 @@ impl ZeroCopyCache {
         }
 
         // 캐시에 없거나 파일이 변경된 경우 → 파일을 읽어서 메모리에 저장
-        dev_print!("Loading file to memory cache: {:?} ({}KB)", path_buf, file_size / 1024);
+        dev_print!(
+            "Loading file to memory cache: {:?} ({}KB)",
+            path_buf,
+            file_size / 1024
+        );
         // Vec<u8> → Arc<[u8]> 1회 변환 (Vec의 버퍼를 그대로 인계)
         let file_data: Arc<[u8]> = std::fs::read(&path_buf)?.into();
-        let cached_data = CachedFileData::new(Arc::clone(&file_data), path_buf.clone(), modified_time);
+        let cached_data =
+            CachedFileData::new(Arc::clone(&file_data), path_buf.clone(), modified_time);
 
         // 캐시에 추가 (또는 갱신)
         {
@@ -333,7 +353,11 @@ impl ZeroCopyCache {
     }
 
     /// 캐시 용량 확보
-    fn ensure_cache_capacity(&self, cache:  Arc<DashMap<PathBuf, CachedFileData>>, new_file_size: usize) {
+    fn ensure_cache_capacity(
+        &self,
+        cache: Arc<DashMap<PathBuf, CachedFileData>>,
+        new_file_size: usize,
+    ) {
         // 파일 개수 제한 확인
         while cache.len() >= self.max_cache_files {
             self.evict_oldest_from_cache(&cache);
@@ -353,7 +377,10 @@ impl ZeroCopyCache {
     }
 
     /// 가장 오래된 항목 제거
-    fn evict_oldest_from_cache(&self, cache: &Arc<DashMap<PathBuf, CachedFileData>>) -> Option<usize> {
+    fn evict_oldest_from_cache(
+        &self,
+        cache: &Arc<DashMap<PathBuf, CachedFileData>>,
+    ) -> Option<usize> {
         if cache.is_empty() {
             return None;
         }
@@ -365,7 +392,11 @@ impl ZeroCopyCache {
 
         if let Some((oldest_path, size)) = oldest_entry {
             cache.remove(&oldest_path);
-            dev_print!("Evicted file from memory cache: {:?} ({}KB)", oldest_path, size / 1024);
+            dev_print!(
+                "Evicted file from memory cache: {:?} ({}KB)",
+                oldest_path,
+                size / 1024
+            );
             return Some(size);
         }
 
@@ -375,11 +406,14 @@ impl ZeroCopyCache {
     /// 만료된 캐시 항목 정리
     pub fn cleanup_expired(&self) {
         let now = SystemTime::now();
-        
-        let expired_keys: Vec<PathBuf> = self.memory_cache
+
+        let expired_keys: Vec<PathBuf> = self
+            .memory_cache
             .iter()
-            .filter_map( |file| {
-                if now.duration_since(file.last_accessed()).unwrap_or_default() > self.cache_duration {
+            .filter_map(|file| {
+                if now.duration_since(file.last_accessed()).unwrap_or_default()
+                    > self.cache_duration
+                {
                     Some(file.key().clone())
                 } else {
                     None
@@ -389,7 +423,11 @@ impl ZeroCopyCache {
 
         for key in expired_keys {
             if let Some((_path, removed)) = self.memory_cache.remove(&key) {
-                dev_print!("Removed expired file from cache: {:?} ({}KB)", key, removed.original_size / 1024);
+                dev_print!(
+                    "Removed expired file from cache: {:?} ({}KB)",
+                    key,
+                    removed.original_size / 1024
+                );
             }
         }
     }
@@ -397,7 +435,7 @@ impl ZeroCopyCache {
     /// 캐시 통계
     pub fn stats(&self) -> CacheStats {
         let total_size: usize = self.memory_cache.iter().map(|f| f.original_size).sum();
-        
+
         CacheStats {
             file_count: self.memory_cache.len(),
             total_size,
@@ -412,7 +450,11 @@ impl ZeroCopyCache {
         let count = self.memory_cache.len();
         let total_size: usize = self.memory_cache.iter().map(|f| f.original_size).sum();
         self.memory_cache.clear();
-        dev_print!("Cleared memory cache: {} files, {}MB", count, total_size / (1024 * 1024));
+        dev_print!(
+            "Cleared memory cache: {} files, {}MB",
+            count,
+            total_size / (1024 * 1024)
+        );
     }
 }
 
@@ -500,14 +542,22 @@ where
     // 파일 크기에 따라 적절한 방법 선택
     let metadata = std::fs::metadata(&path)?;
     let file_size = metadata.len() as usize;
-    
-    if file_size <= 1024 * 1024 { // 1MB 이하는 일반 읽기
-        dev_print!("Small JSON file, using standard read: {}KB", file_size / 1024);
+
+    if file_size <= 1024 * 1024 {
+        // 1MB 이하는 일반 읽기
+        dev_print!(
+            "Small JSON file, using standard read: {}KB",
+            file_size / 1024
+        );
         let data = std::fs::read(&path)?;
         let json_str = std::str::from_utf8(&data)?;
         Ok(serde_json::from_str(json_str)?)
-    } else { // 큰 파일은 memmap2 사용
-        dev_print!("Large JSON file, using zero-copy mmap: {}MB", file_size / (1024 * 1024));
+    } else {
+        // 큰 파일은 memmap2 사용
+        dev_print!(
+            "Large JSON file, using zero-copy mmap: {}MB",
+            file_size / (1024 * 1024)
+        );
         let zero_copy_file = ZeroCopyFile::new(path)?;
         zero_copy_file.parse_json()
     }

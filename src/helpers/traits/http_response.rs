@@ -84,7 +84,9 @@ impl ResponseUtil for Response<Writer> {
                     connection_config.max_idle_time.as_secs(),
                     connection_config.max_connections_per_host
                 )?;
-            } else if !connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
+            } else if !connection_config.enable_keep_alive
+                && !self.headers().contains_key(CONNECTION)
+            {
                 send_string.push_str("Connection: close\r\n");
             }
         }
@@ -229,7 +231,11 @@ impl ResponseUtil for Response<Writer> {
                 send_string.push_str("Content-Type: application/json\r\n");
             }
             _ => {
-                write!(send_string, "Content-Type: {}\r\n", get_content_type(file_path))?;
+                write!(
+                    send_string,
+                    "Content-Type: {}\r\n",
+                    get_content_type(file_path)
+                )?;
             }
         }
 
@@ -319,7 +325,9 @@ impl ResponseUtilArena for Response<ArenaWriter> {
                     connection_config.max_idle_time.as_secs(),
                     connection_config.max_connections_per_host
                 )?;
-            } else if !connection_config.enable_keep_alive && !self.headers().contains_key(CONNECTION) {
+            } else if !connection_config.enable_keep_alive
+                && !self.headers().contains_key(CONNECTION)
+            {
                 send_string.push_str("Connection: close\r\n");
             }
         }
@@ -358,7 +366,11 @@ impl ResponseUtilArena for Response<ArenaWriter> {
                             )?;
                         }
                         _ => {
-                            write!(send_string, "Content-Type: {}\r\n", get_content_type(file_path))?;
+                            write!(
+                                send_string,
+                                "Content-Type: {}\r\n",
+                                get_content_type(file_path)
+                            )?;
                         }
                     }
 
@@ -394,7 +406,11 @@ impl ResponseUtilArena for Response<ArenaWriter> {
                     write!(send_string, "{}: {}\r\n", key.as_str(), value.to_str()?)?;
                 }
 
-                write!(send_string, "content-length: {}\r\n", self.body().response_data_len)?;
+                write!(
+                    send_string,
+                    "content-length: {}\r\n",
+                    self.body().response_data_len
+                )?;
                 send_string.push_str("\r\n");
 
                 // mutable borrow 문제 해결: body_mut()을 한 번만 호출
@@ -488,7 +504,11 @@ impl ResponseUtilArena for Response<ArenaWriter> {
                 send_string.push_str("Content-Type: application/json\r\n");
             }
             _ => {
-                write!(send_string, "Content-Type: {}\r\n", get_content_type(file_path))?;
+                write!(
+                    send_string,
+                    "Content-Type: {}\r\n",
+                    get_content_type(file_path)
+                )?;
             }
         }
 
@@ -554,7 +574,9 @@ impl SendBytes for tokio::net::TcpStream {
             // vectored_io 기능이 켜져 있을 때도 부분 쓰기 처리
             let mut written = 0;
             while written < bytes.len() {
-                let n = self.write_vectored(&[std::io::IoSlice::new(&bytes[written..])]).await?;
+                let n = self
+                    .write_vectored(&[std::io::IoSlice::new(&bytes[written..])])
+                    .await?;
                 if n == 0 {
                     return Err("Connection closed during write".into());
                 }
@@ -595,7 +617,8 @@ impl SendBytes for tokio::net::TcpStream {
             }
 
             // 남은 버퍼들을 IoSlice로 재구성
-            let mut remaining_bufs: Vec<std::io::IoSlice> = Vec::with_capacity(bufs.len() - buf_idx);
+            let mut remaining_bufs: Vec<std::io::IoSlice> =
+                Vec::with_capacity(bufs.len() - buf_idx);
 
             // 첫 번째 버퍼는 오프셋을 적용
             if current_written > 0 {
