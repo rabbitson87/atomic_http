@@ -1,0 +1,8 @@
+# Local cargo config — 라이브러리 사용자에게 강요되지 않고
+# 이 워크스페이스에서 실행할 때만 적용됨.
+
+[alias]
+# 벤치를 native CPU 명령어로 빌드 (SIMD 등 풀 활용).
+# 배포 바이너리에는 영향 없음 — 벤치 실행 시에만.
+# Usage: `cargo bench-native --bench http_perf --features arena -- --quick`
+bench-native = ["bench", "--config", "build.rustflags=[\"-C\", \"target-cpu=native\"]"]

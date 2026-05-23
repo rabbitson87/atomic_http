@@ -22,8 +22,12 @@ impl Writer {
     where
         P: AsRef<Path>,
     {
+        use crate::helpers::traits::safe_path_join;
         let root_path = &self.options.root_path;
-        let file_path = root_path.join(path);
+        // path traversal 방어: 사용자 입력에 `..` / 절대 경로 / 드라이브 prefix가
+        // 있으면 root 밖으로 새 나갈 수 있으므로 즉시 거부.
+        let file_path = safe_path_join(root_path, &path)
+            .ok_or("invalid path: traversal segments are not allowed")?;
 
         // 제로카피 기능이 활성화된 경우 memmap2 사용 시도
         // 파일 크기 확인
@@ -38,14 +42,15 @@ impl Writer {
                     file_path,
                     file_size / 1024
                 );
-                self.body = format!("__ZERO_COPY_FILE__:{}", file_path.to_str().unwrap());
+                // non-UTF-8 경로(Windows 등)에서 panic 회피 — lossy 변환
+                self.body = format!("__ZERO_COPY_FILE__:{}", file_path.to_string_lossy());
                 self.use_file = true;
                 return Ok(());
             }
         }
 
         // 기존 방식 (대용량 파일 또는 zero_copy 기능 비활성화)
-        self.body = file_path.to_str().unwrap().to_string();
+        self.body = file_path.to_string_lossy().into_owned();
         self.use_file = true;
         Ok(())
     }
@@ -564,82 +569,103 @@ pub trait SendBytes {
     async fn send_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), SendableError>;
 }
 
-#[async_trait]
-impl SendBytes for tokio::net::TcpStream {
-    async fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), SendableError> {
-        use tokio::io::AsyncWriteExt;
+// 공통 send_bytes 구현 — AsyncWrite 만 있으면 동작.
+async fn send_bytes_generic<W>(stream: &mut W, bytes: &[u8]) -> Result<(), SendableError>
+where
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    use tokio::io::AsyncWriteExt;
 
-        #[cfg(feature = "vectored_io")]
-        {
-            // vectored_io 기능이 켜져 있을 때도 부분 쓰기 처리
-            let mut written = 0;
-            while written < bytes.len() {
-                let n = self
-                    .write_vectored(&[std::io::IoSlice::new(&bytes[written..])])
-                    .await?;
-                if n == 0 {
-                    return Err("Connection closed during write".into());
-                }
-                written += n;
+    #[cfg(feature = "vectored_io")]
+    {
+        let mut written = 0;
+        while written < bytes.len() {
+            let n = stream
+                .write_vectored(&[std::io::IoSlice::new(&bytes[written..])])
+                .await?;
+            if n == 0 {
+                return Err("Connection closed during write".into());
             }
+            written += n;
+        }
+    }
+
+    #[cfg(not(feature = "vectored_io"))]
+    {
+        stream.write_all(bytes).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "vectored_io")]
+async fn send_vectored_generic<W>(
+    stream: &mut W,
+    bufs: &[std::io::IoSlice<'_>],
+) -> Result<(), SendableError>
+where
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    use tokio::io::AsyncWriteExt;
+
+    let total_size: usize = bufs.iter().map(|b| b.len()).sum();
+    let mut written = 0;
+
+    while written < total_size {
+        let mut current_written = written;
+        let mut buf_idx = 0;
+
+        while buf_idx < bufs.len() && current_written >= bufs[buf_idx].len() {
+            current_written -= bufs[buf_idx].len();
+            buf_idx += 1;
         }
 
-        #[cfg(not(feature = "vectored_io"))]
-        {
-            // write_all은 이미 부분 쓰기를 처리함
-            self.write_all(bytes).await?;
+        if buf_idx >= bufs.len() {
+            break;
         }
-        Ok(())
+
+        let mut remaining_bufs: Vec<std::io::IoSlice> = Vec::with_capacity(bufs.len() - buf_idx);
+
+        if current_written > 0 {
+            remaining_bufs.push(std::io::IoSlice::new(&bufs[buf_idx][current_written..]));
+            buf_idx += 1;
+        }
+
+        for buf in &bufs[buf_idx..] {
+            remaining_bufs.push(std::io::IoSlice::new(buf));
+        }
+
+        let n = stream.write_vectored(&remaining_bufs).await?;
+        if n == 0 {
+            return Err("Connection closed during vectored write".into());
+        }
+        written += n;
+    }
+
+    Ok(())
+}
+
+#[async_trait]
+impl SendBytes for tokio::net::tcp::OwnedWriteHalf {
+    async fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), SendableError> {
+        send_bytes_generic(self, bytes).await
     }
 
     #[cfg(feature = "vectored_io")]
     async fn send_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), SendableError> {
-        use tokio::io::AsyncWriteExt;
+        send_vectored_generic(self, bufs).await
+    }
+}
 
-        // 전체 데이터 크기 계산
-        let total_size: usize = bufs.iter().map(|b| b.len()).sum();
-        let mut written = 0;
+// 기존 TcpStream 호환성 유지 (테스트/internal 코드용).
+#[async_trait]
+impl SendBytes for tokio::net::TcpStream {
+    async fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), SendableError> {
+        send_bytes_generic(self, bytes).await
+    }
 
-        // 부분 쓰기를 처리하기 위한 루프
-        while written < total_size {
-            // 현재 쓸 버퍼들의 오프셋 계산
-            let mut current_written = written;
-            let mut buf_idx = 0;
-
-            // written 바이트만큼 건너뛰기
-            while buf_idx < bufs.len() && current_written >= bufs[buf_idx].len() {
-                current_written -= bufs[buf_idx].len();
-                buf_idx += 1;
-            }
-
-            if buf_idx >= bufs.len() {
-                break; // 모두 전송됨
-            }
-
-            // 남은 버퍼들을 IoSlice로 재구성
-            let mut remaining_bufs: Vec<std::io::IoSlice> =
-                Vec::with_capacity(bufs.len() - buf_idx);
-
-            // 첫 번째 버퍼는 오프셋을 적용
-            if current_written > 0 {
-                remaining_bufs.push(std::io::IoSlice::new(&bufs[buf_idx][current_written..]));
-                buf_idx += 1;
-            }
-
-            // 나머지 버퍼들 추가
-            for buf in &bufs[buf_idx..] {
-                remaining_bufs.push(std::io::IoSlice::new(buf));
-            }
-
-            // 쓰기 수행
-            let n = self.write_vectored(&remaining_bufs).await?;
-            if n == 0 {
-                return Err("Connection closed during vectored write".into());
-            }
-            written += n;
-        }
-
-        Ok(())
+    #[cfg(feature = "vectored_io")]
+    async fn send_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<(), SendableError> {
+        send_vectored_generic(self, bufs).await
     }
 }
 

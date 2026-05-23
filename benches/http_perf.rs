@@ -43,7 +43,6 @@ fn build_multipart_body(num_parts: usize, body_size: usize) -> Vec<u8> {
 }
 
 fn build_request(body: Vec<u8>) -> Request<Body> {
-    let len = body.len();
     Request::builder()
         .header(
             "content-type",
@@ -51,8 +50,6 @@ fn build_request(body: Vec<u8>) -> Request<Body> {
         )
         .body(Body {
             bytes: body,
-            body: String::new(),
-            len,
             ip: None,
         })
         .unwrap()

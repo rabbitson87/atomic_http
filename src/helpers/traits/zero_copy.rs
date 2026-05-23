@@ -27,7 +27,9 @@ impl ZeroCopyFile {
             return Err("Cannot memory map empty file".into());
         }
 
-        // SAFETY: 파일이 외부에서 수정되지 않는다고 가정
+        // SAFETY: `Mmap::map` 은 다른 프로세스/스레드가 매핑된 파일을 수정하지 않는다는
+        // 호출자 보장을 요구함. 본 서버는 응답 정적 파일을 read-only로 서빙한다는 전제이며,
+        // 외부 변조 시 UB. 정적 자산 서빙 외 용도라면 호출자가 파일 수명을 보장해야 함.
         let mmap = unsafe { Mmap::map(&file)? };
 
         Ok(Self {
@@ -522,7 +524,8 @@ pub struct CacheStats {
 
 impl std::fmt::Display for CacheStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, 
+        write!(
+            f,
             "Memory Cache Stats: {} files, {:.2}/{:.2} MB used, max {} files, max {:.2} MB per file",
             self.file_count,
             self.total_size as f64 / 1_048_576.0,

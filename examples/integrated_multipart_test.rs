@@ -379,12 +379,17 @@ impl IntegratedMultipartTest {
                                 let total_size: usize =
                                     form.parts.iter().map(|p| p.body.len()).sum();
 
+                                let text_fields_map: serde_json::Map<String, serde_json::Value> =
+                                    form.text_fields
+                                        .iter()
+                                        .map(|(k, v)| {
+                                            (k.clone(), serde_json::Value::String(v.clone()))
+                                        })
+                                        .collect();
                                 let response_data = serde_json::json!({
                                     "status": "success",
                                     "server_type": "standard",
-                                    "text_fields": {
-                                        form.text.0: form.text.1
-                                    },
+                                    "text_fields": text_fields_map,
                                     "file_count": form.parts.len(),
                                     "files": form.parts.iter().map(|part| {
                                         serde_json::json!({

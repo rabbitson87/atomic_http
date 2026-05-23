@@ -4,7 +4,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, Request, Response};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{self, AsyncReadExt};
 use tokio::net::TcpStream;
 #[cfg(feature = "tokio_rustls")]
@@ -15,24 +15,34 @@ use crate::{ArenaBody, ArenaWriter};
 use crate::{Body, Options, SendableError, Writer};
 
 pub struct Form {
-    pub text: (String, String),
+    /// 모든 텍스트 필드(`(name, value)`). 이전 0.13.x의 `text: (String, String)`은
+    /// 단일 필드만 보관해서 다중 텍스트 필드가 있는 폼에선 마지막 것만 남는 버그가 있었음.
+    pub text_fields: Vec<(String, String)>,
     pub parts: Vec<Part>,
 }
 
 impl Form {
     pub fn new() -> Self {
         Self {
-            text: (String::new(), String::new()),
+            text_fields: Vec::new(),
             parts: Vec::new(),
         }
     }
 
-    pub fn add_text_field(&mut self, name: &mut String, value: &mut String) {
-        self.text = (std::mem::take(name), std::mem::take(value));
+    pub fn add_text_field(&mut self, name: String, value: String) {
+        self.text_fields.push((name, value));
     }
 
     pub fn add_part(&mut self, part: Part) {
         self.parts.push(part);
+    }
+
+    /// 이름으로 텍스트 필드 값 찾기 (첫 매치).
+    pub fn find_text_field(&self, name: &str) -> Option<&str> {
+        self.text_fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -281,7 +291,11 @@ impl ArenaHeaderRef {
     }
 }
 
-// Send + Sync 구현 (Arena 메모리는 thread-safe)
+// SAFETY: 이 타입들의 raw `*const u8` 필드는 모두
+// `ArenaBody._bump` (Box<Bump>) 내부 할당을 가리킴.
+// 사용 규약: 동일 요청 처리 중 ArenaBody가 살아있는 한 ArenaForm/PartRef/TextFieldRef/HeaderRef
+// 가 가리키는 메모리는 유효. ArenaBody와 같은 lifetime/스레드로 함께 이동되므로
+// dangling 위험 없음. raw pointer 자체는 !Send/!Sync 이지만 위 규약을 사용자가 지키면 안전.
 #[cfg(feature = "arena")]
 unsafe impl Send for ArenaForm {}
 #[cfg(feature = "arena")]
@@ -301,7 +315,20 @@ unsafe impl Sync for ArenaHeaderRef {}
 
 #[async_trait]
 pub trait StreamHttp {
+    /// **buffered** body 파싱: 헤더+body 전체를 메모리에 읽은 뒤 Request 반환.
+    /// 작은 JSON/form 요청에 적합. `max_body_size` 가 OOM 방어를 강제.
     async fn parse_request(
+        self,
+        options: Arc<Options>,
+        peer: SocketAddr,
+    ) -> Result<(Request<Body>, Response<Writer>), SendableError>;
+
+    /// **streaming** body 파싱 (0.14.0 신규): 헤더만 읽고 socket의 read half를
+    /// `Body` 에 부착하여 반환. 핸들러는 `body.read_chunk()` / `body.into_multipart()` /
+    /// `body.into_stream()` 으로 청크 단위 처리 가능. 대용량 업로드(파일/multipart)에 적합.
+    ///
+    /// `body.bytes(cap)` 으로 전체 버퍼링도 가능하지만, 그 경우엔 그냥 `parse_request` 가 더 단순.
+    async fn parse_request_streaming(
         self,
         options: Arc<Options>,
         peer: SocketAddr,
@@ -325,6 +352,55 @@ impl StreamHttp for TcpStream {
             request, stream, options, peer,
         )?)
     }
+
+    async fn parse_request_streaming(
+        self,
+        options: Arc<Options>,
+        peer: SocketAddr,
+    ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
+        self.set_nodelay(options.no_delay)?;
+
+        let HeaderReadResult {
+            header_bytes,
+            leftover,
+            content_length,
+            stream,
+        } = read_headers_only(self, &options).await?;
+
+        // 1) 헤더만으로 Request<Body> 빌드 (parser는 body 부분 비어있어도 OK)
+        let request_buffered = get_request(header_bytes).await?;
+        let (parts, _empty_body) = request_buffered.into_parts();
+
+        // 2) stream을 split — read half는 Body로, write half는 Writer로
+        let (read_half, write_half) = stream.into_split();
+
+        // 3) Body를 streaming 모드로 재구성
+        let streaming_body = Body::new_streaming(
+            leftover,
+            read_half,
+            content_length,
+            Some(peer),
+            options.max_body_size,
+        );
+        let request = Request::from_parts(parts, streaming_body);
+        let version = request.version();
+
+        // 4) Writer는 write half + 빈 응답
+        Ok((
+            request,
+            Response::builder()
+                .version(version)
+                .header(CONTENT_TYPE, "application/json")
+                .status(400)
+                .body(Writer {
+                    stream: write_half,
+                    body: String::new(),
+                    bytes: vec![],
+                    use_file: false,
+                    options,
+                })?,
+        ))
+    }
 }
 
 #[cfg(feature = "tokio_rustls")]
@@ -346,6 +422,20 @@ impl StreamHttp for TlsStream<TcpStream> {
             request, stream, options, peer,
         )?)
     }
+
+    async fn parse_request_streaming(
+        self,
+        options: Arc<Options>,
+        peer: SocketAddr,
+    ) -> Result<(Request<Body>, Response<Writer>), SendableError> {
+        // TLS 변형은 TcpStream::into_split이 불가하므로 (TlsStream이 감싸고 있어)
+        // 평문 TcpStream 추출 후 동일 처리. 다만 TLS 위에서 body streaming 의 보안 의미는
+        // 별도 검토 필요 (헤더는 TLS로 보호되지만 body 청크 read도 TLS 통과해야 함).
+        // 현재 구현은 TLS 종료 후 평문 streaming → TLS 보호 외 영역으로 데이터 흐름.
+        // TLS streaming이 필요하면 추후 별도 API 추가.
+        let stream = self.into_inner().0;
+        StreamHttp::parse_request_streaming(stream, options, peer).await
+    }
 }
 
 pub(crate) fn get_parse_result_from_request(
@@ -357,6 +447,10 @@ pub(crate) fn get_parse_result_from_request(
     let version = request.version();
     request.body_mut().ip = Some(peer);
 
+    // 0.14.0: body는 이미 buffered 모드로 다 읽혔으므로 read half는 버리고
+    // write half 만 Writer 로. (streaming 경로는 parse_request_streaming 별도 함수.)
+    let (_read_half, write_half) = stream.into_split();
+
     Ok((
         request,
         Response::builder()
@@ -364,7 +458,7 @@ pub(crate) fn get_parse_result_from_request(
             .header(CONTENT_TYPE, "application/json")
             .status(400)
             .body(Writer {
-                stream,
+                stream: write_half,
                 body: String::new(),
                 bytes: vec![],
                 use_file: false,
@@ -372,6 +466,164 @@ pub(crate) fn get_parse_result_from_request(
             })?,
     ))
 }
+/// `read_headers_only` 결과 — 헤더 부분 + body 앞부분으로 미리 들어온 leftover +
+/// Content-Length(있을 때) + 후속 stream.
+pub(crate) struct HeaderReadResult {
+    pub header_bytes: Vec<u8>,
+    pub leftover: Vec<u8>,
+    pub content_length: Option<usize>,
+    pub stream: TcpStream,
+}
+
+/// `read_headers_only` 이후 남은 body를 마저 읽어 단일 Vec로 반환.
+/// `parse_request_auto` 의 arena 경로에서 사용 (작은 요청은 통째 buffered 가 필요).
+pub(crate) async fn read_remaining_body(
+    initial_leftover: Vec<u8>,
+    mut stream: TcpStream,
+    content_length: Option<usize>,
+    options: &Options,
+) -> Result<(Vec<u8>, TcpStream), SendableError> {
+    const BODY_READ_CHUNK: usize = 64 * 1024;
+    let total_expected = content_length.unwrap_or(0);
+    let mut final_buffer = initial_leftover;
+    let mut total_read = final_buffer.len();
+    let read_timeout = Duration::from_millis(options.read_timeout_milliseconds);
+    let mut retry_count: u8 = 0;
+
+    while total_read < total_expected && retry_count < options.read_max_retry {
+        let remaining = total_expected - total_read;
+        let chunk_size = remaining.min(BODY_READ_CHUNK);
+        if final_buffer.len() < total_read + chunk_size {
+            final_buffer.resize(total_read + chunk_size, 0);
+        }
+        match tokio::time::timeout(
+            read_timeout,
+            stream.read(&mut final_buffer[total_read..total_read + chunk_size]),
+        )
+        .await
+        {
+            Ok(Ok(n)) => {
+                if n == 0 {
+                    break;
+                }
+                total_read += n;
+                retry_count = 0;
+            }
+            _ => {
+                retry_count += 1;
+            }
+        }
+    }
+    final_buffer.truncate(total_read);
+    Ok((final_buffer, stream))
+}
+
+/// **헤더만 읽고** body는 socket에 그대로 남겨둔 채 반환한다.
+/// `parse_request_streaming` 전용. body 부분이 미리 들어와 있으면 `leftover` 로 분리.
+pub(crate) async fn read_headers_only(
+    mut stream: TcpStream,
+    options: &Options,
+) -> Result<HeaderReadResult, SendableError> {
+    const MAX_HEADER_SIZE: usize = 64 * 1024;
+    const INITIAL_READ_SIZE: usize = 4096;
+    const HEADER_END_MARKER: &[u8] = b"\r\n\r\n";
+
+    let initial_read = match options.read_buffer_size {
+        0 => INITIAL_READ_SIZE,
+        n => n,
+    };
+
+    let mut buffer: Vec<u8> = Vec::with_capacity(initial_read);
+    let mut content_length = None;
+    let mut header_end_pos: Option<usize> = None;
+    let mut retry_count = 0;
+    let max_retry = options.read_max_retry;
+    let read_timeout = Duration::from_millis(options.read_timeout_milliseconds);
+    let header_deadline_ms = options
+        .header_read_deadline_ms
+        .unwrap_or_else(|| options.read_timeout_milliseconds * (max_retry as u64 + 1));
+    let header_start = Instant::now();
+
+    while header_end_pos.is_none() && buffer.len() < MAX_HEADER_SIZE && retry_count < max_retry {
+        if header_start.elapsed().as_millis() as u64 > header_deadline_ms {
+            return Err(format!(
+                "Header read deadline exceeded ({} ms) — possible slowloris",
+                header_deadline_ms
+            )
+            .into());
+        }
+        let current_len = buffer.len();
+        let chunk = if current_len == 0 {
+            initial_read
+        } else {
+            determine_next_read_size(current_len)
+        };
+        let new_size = (current_len + chunk).min(MAX_HEADER_SIZE);
+        buffer.resize(new_size, 0);
+
+        match tokio::time::timeout(read_timeout, stream.read(&mut buffer[current_len..])).await {
+            Ok(Ok(n)) => {
+                if n == 0 {
+                    buffer.truncate(current_len);
+                    break;
+                }
+                let new_len = current_len + n;
+                buffer.truncate(new_len);
+
+                let search_start = current_len.saturating_sub(HEADER_END_MARKER.len() - 1);
+                if let Some(rel) = find_header_end_optimized(&buffer[search_start..]) {
+                    let end = search_start + rel + 4;
+                    header_end_pos = Some(end);
+                    content_length = extract_content_length_simple(&buffer[..end]);
+                    break;
+                }
+                retry_count = 0;
+            }
+            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                buffer.truncate(current_len);
+                continue;
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                buffer.truncate(current_len);
+                retry_count += 1;
+                continue;
+            }
+        }
+    }
+
+    if buffer.is_empty() {
+        return Err("No data received".into());
+    }
+
+    let header_end = match header_end_pos {
+        Some(p) => p,
+        None => return Err("Headers incomplete: \\r\\n\\r\\n not found".into()),
+    };
+
+    // 광고된 Content-Length가 cap을 넘으면 streaming 시작 전에 거부.
+    if let (Some(cl), Some(cap)) = (content_length, options.max_body_size) {
+        if cl > cap {
+            return Err(format!(
+                "Request body too large: content-length={} exceeds max_body_size={}",
+                cl, cap
+            )
+            .into());
+        }
+    }
+
+    // 헤더 read 시 body 앞부분이 같이 들어왔을 수 있음 → leftover로 분리
+    let leftover = buffer.split_off(header_end);
+    let header_bytes = buffer;
+
+    Ok(HeaderReadResult {
+        header_bytes,
+        leftover,
+        content_length,
+        stream,
+    })
+}
+
 pub(crate) async fn get_bytes_from_reader(
     mut stream: TcpStream,
     options: &Options,
@@ -393,12 +645,26 @@ pub(crate) async fn get_bytes_from_reader(
     let mut header_end_pos = None;
     let mut retry_count = 0;
     let max_retry = options.read_max_retry;
-    let read_timeout = Duration::from_millis(options.read_timeout_miliseconds);
+    let read_timeout = Duration::from_millis(options.read_timeout_milliseconds);
+
+    // Slowloris 방어: 헤더 수신 전체에 절대 deadline.
+    // 옵션 미설정 시 read_timeout * (max_retry + 1)로 자동 산출.
+    let header_deadline_ms = options
+        .header_read_deadline_ms
+        .unwrap_or_else(|| options.read_timeout_milliseconds * (max_retry as u64 + 1));
+    let header_start = Instant::now();
 
     while header_end_pos.is_none()
         && header_buffer.len() < MAX_HEADER_SIZE
         && retry_count < max_retry
     {
+        if header_start.elapsed().as_millis() as u64 > header_deadline_ms {
+            return Err(format!(
+                "Header read deadline exceeded ({} ms) — possible slowloris",
+                header_deadline_ms
+            )
+            .into());
+        }
         let current_len = header_buffer.len();
         let chunk = if current_len == 0 {
             initial_read
@@ -426,10 +692,9 @@ pub(crate) async fn get_bytes_from_reader(
                     if let Some(relative_pos) =
                         find_header_end_optimized(&header_buffer[search_start..])
                     {
-                        header_end_pos = Some(search_start + relative_pos + 4); // +4 for "\r\n\r\n"
-                        content_length = extract_content_length_simple(
-                            &header_buffer[..header_end_pos.unwrap()],
-                        );
+                        let end = search_start + relative_pos + 4; // +4 for "\r\n\r\n"
+                        header_end_pos = Some(end);
+                        content_length = extract_content_length_simple(&header_buffer[..end]);
                         break;
                     }
                     retry_count = 0;
@@ -454,19 +719,23 @@ pub(crate) async fn get_bytes_from_reader(
 
     let header_end = header_end_pos.unwrap_or(header_buffer.len());
 
-    // 2단계: 전체 크기 계산 및 최종 버퍼 할당
+    // DoS 방어: 광고된 Content-Length가 cap을 넘으면 즉시 거부 (대용량 alloc 방지)
+    if let (Some(cl), Some(cap)) = (content_length, options.max_body_size) {
+        if cl > cap {
+            return Err(format!(
+                "Request body too large: content-length={} exceeds max_body_size={}",
+                cl, cap
+            )
+            .into());
+        }
+    }
+
+    // 2단계: 전체 크기 계산. 사전 alloc 하지 않고 들어오는 만큼만 점진 grow.
+    // (Content-Length 만큼 미리 alloc 하면 100GB CL 헤더만으로 OOM 가능.)
     let total_expected_size = header_end + content_length.unwrap_or(0);
+    let mut final_buffer = header_buffer;
 
-    // 이미 읽은 데이터보다 크면 더 큰 버퍼 필요
-    let mut final_buffer = if total_expected_size > header_buffer.len() {
-        let mut buf = Vec::with_capacity(total_expected_size);
-        buf.extend_from_slice(&header_buffer);
-        buf
-    } else {
-        header_buffer
-    };
-
-    // 3단계: 남은 바디 데이터 읽기 (남은 만큼 한 번에 가져가기)
+    // 3단계: 남은 바디 데이터 읽기 (64KB 청크 단위 점진 grow)
     const BODY_READ_CHUNK: usize = 64 * 1024;
     let mut total_read = final_buffer.len();
     while total_read < total_expected_size && retry_count < options.read_max_retry {
@@ -638,14 +907,10 @@ pub(crate) async fn get_request(bytes: Vec<u8>) -> Result<Request<Body>, Sendabl
     } else {
         Vec::new()
     };
-    let len = body_bytes.len();
 
-    let request = builder.body(Body {
-        body: String::new(),
-        bytes: body_bytes,
-        len,
-        ip: None,
-    })?;
+    // parse_http_request 호출 시점에는 still buffered (전체 body가 메모리에 있음).
+    // parse_request_streaming 경로에서는 별도 함수가 body 를 streaming Body 로 생성.
+    let request = builder.body(Body::from_bytes(body_bytes, None))?;
 
     Ok(request)
 }
@@ -700,13 +965,26 @@ pub(crate) async fn get_bytes_arena_direct(
     let mut content_length = None;
     let mut retry_count = 0;
     let max_retry = options.read_max_retry;
-    let read_timeout = Duration::from_millis(options.read_timeout_miliseconds);
+    let read_timeout = Duration::from_millis(options.read_timeout_milliseconds);
+
+    // Slowloris 방어: 헤더 수신 전체 deadline
+    let header_deadline_ms = options
+        .header_read_deadline_ms
+        .unwrap_or_else(|| options.read_timeout_milliseconds * (max_retry as u64 + 1));
+    let header_start = Instant::now();
 
     // 헤더 읽기 및 파싱
     while header_end_pos.is_none()
         && temp_header_buf.len() < MAX_HEADER_SIZE
         && retry_count < max_retry
     {
+        if header_start.elapsed().as_millis() as u64 > header_deadline_ms {
+            return Err(format!(
+                "Header read deadline exceeded ({} ms) — possible slowloris",
+                header_deadline_ms
+            )
+            .into());
+        }
         let next_chunk_size = determine_next_read_size(temp_header_buf.len());
         let current_len = temp_header_buf.len();
         temp_header_buf.resize(current_len + next_chunk_size, 0);
@@ -730,10 +1008,9 @@ pub(crate) async fn get_bytes_arena_direct(
                     // 헤더 끝 찾기
                     let search_start = current_len.saturating_sub(HEADER_END_MARKER.len() - 1);
                     if let Some(pos) = find_header_end_optimized(&temp_header_buf[search_start..]) {
-                        header_end_pos = Some(search_start + pos + 4);
-                        content_length = extract_content_length_simple(
-                            &temp_header_buf[..header_end_pos.unwrap()],
-                        );
+                        let end = search_start + pos + 4;
+                        header_end_pos = Some(end);
+                        content_length = extract_content_length_simple(&temp_header_buf[..end]);
                         break;
                     }
                     retry_count = 0;
@@ -753,16 +1030,23 @@ pub(crate) async fn get_bytes_arena_direct(
     }
 
     let header_end = header_end_pos.unwrap_or(temp_header_buf.len());
+
+    // DoS 방어: 광고된 Content-Length가 cap 초과 시 즉시 거부
+    if let (Some(cl), Some(cap)) = (content_length, options.max_body_size) {
+        if cl > cap {
+            return Err(format!(
+                "Request body too large: content-length={} exceeds max_body_size={}",
+                cl, cap
+            )
+            .into());
+        }
+    }
+
     let total_size = header_end + content_length.unwrap_or(0);
 
-    // 2단계: 남은 바디 데이터 읽기 (Vec으로)
-    let mut final_buffer = if total_size > temp_header_buf.len() {
-        let mut buf = Vec::with_capacity(total_size);
-        buf.extend_from_slice(&temp_header_buf);
-        buf
-    } else {
-        temp_header_buf
-    };
+    // 2단계: 사전 alloc 하지 않고 들어오는 만큼만 점진 grow.
+    // (Content-Length 만큼 미리 alloc 하면 100GB CL 헤더만으로 OOM 가능.)
+    let mut final_buffer = temp_header_buf;
 
     // 3단계: 남은 바디 데이터 읽기
     let mut total_read = final_buffer.len();
@@ -874,6 +1158,8 @@ fn get_parse_result_arena(
     let version = request.version();
     request.body_mut().ip = Some(peer);
 
+    let (_read_half, write_half) = stream.into_split();
+
     Ok((
         request,
         Response::builder()
@@ -881,7 +1167,7 @@ fn get_parse_result_arena(
             .header(CONTENT_TYPE, "application/json")
             .status(400)
             .body(Writer {
-                stream,
+                stream: write_half,
                 body: String::new(),
                 bytes: vec![],
                 use_file: false,
@@ -929,13 +1215,15 @@ pub(crate) fn get_parse_result_arena_writer(
     let version = request.version();
     request.body_mut().ip = Some(peer);
 
+    let (_read_half, write_half) = stream.into_split();
+
     Ok((
         request,
         Response::builder()
             .version(version)
             .header(CONTENT_TYPE, "application/json")
             .status(400)
-            .body(ArenaWriter::new(stream, options))?,
+            .body(ArenaWriter::new(write_half, options))?,
     ))
 }
 
@@ -986,6 +1274,341 @@ mod tests {
         let headers3 = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let result3 = extract_content_length_simple(headers3);
         assert_eq!(result3, None);
+    }
+
+    // 실제 TCP 소켓 페어 — get_bytes_from_reader는 진짜 TcpStream 만 받기 때문에
+    // mock 대신 임시 포트 listener + 즉시 connect로 한 쌍을 만든다.
+    async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client_res, server_res) =
+            tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept(),);
+        (client_res.unwrap(), server_res.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn body_exceeds_max_body_size_is_rejected_by_content_length() {
+        // 핵심 회귀 방지: 광고된 Content-Length가 max_body_size를 초과하면
+        // 단 한 바이트도 alloc/read 하지 않고 즉시 거부되어야 한다.
+        let (mut client, server) = socket_pair().await;
+
+        let req = b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1073741824\r\n\r\n";
+        use tokio::io::AsyncWriteExt;
+        client.write_all(req).await.unwrap();
+
+        let mut options = Options::new();
+        options.max_body_size = Some(1024 * 1024); // 1 MiB cap
+        options.read_timeout_milliseconds = 200;
+        options.read_max_retry = 1;
+
+        let result = get_bytes_from_reader(server, &options).await;
+        assert!(result.is_err(), "expected rejection of CL > cap");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("max_body_size"),
+            "error msg should mention max_body_size cap, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn body_within_max_body_size_passes_through() {
+        // 음성 케이스: 광고된 Content-Length가 cap 이하이면 정상 처리되어야 한다.
+        let (mut client, server) = socket_pair().await;
+
+        let body = b"hello";
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        use tokio::io::AsyncWriteExt;
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut options = Options::new();
+        options.max_body_size = Some(1024); // 1 KiB cap, body는 5B
+        options.read_timeout_milliseconds = 200;
+        options.read_max_retry = 1;
+
+        let (buf, _stream) = get_bytes_from_reader(server, &options)
+            .await
+            .expect("should accept body within cap");
+        // 헤더 + body 가 모두 들어왔는지 확인 (body=hello 가 buf 끝부분에 있어야 함)
+        assert!(
+            buf.ends_with(b"hello"),
+            "expected body 'hello' at end of buffer, got len={}",
+            buf.len()
+        );
+    }
+
+    // ===== 0.14.0 신규 streaming API 검증 =====
+
+    #[tokio::test]
+    async fn streaming_read_chunk_returns_exact_bytes() {
+        // 본격: read_headers_only → split → Body::new_streaming → read_chunk 반복
+        let (mut client, server) = socket_pair().await;
+
+        let body = vec![b'X'; 50_000];
+        let req_head = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+
+        use tokio::io::AsyncWriteExt;
+        let body_clone = body.clone();
+        tokio::spawn(async move {
+            client.write_all(req_head.as_bytes()).await.unwrap();
+            for chunk in body_clone.chunks(8_000) {
+                client.write_all(chunk).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        });
+
+        let mut options = Options::new();
+        options.read_timeout_milliseconds = 1000;
+        options.read_max_retry = 10;
+
+        let hr = read_headers_only(server, &options).await.unwrap();
+        let (read_half, _write_half) = hr.stream.into_split();
+        let mut body_streaming =
+            crate::Body::new_streaming(hr.leftover, read_half, hr.content_length, None, None);
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = body_streaming.read_chunk().await.unwrap() {
+            collected.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(collected.len(), body.len(), "received length mismatch");
+        assert_eq!(collected, body, "received bytes don't match sent body");
+    }
+
+    #[tokio::test]
+    async fn auto_branches_to_arena_when_content_length_within_cap() {
+        // 작은 요청: CL=20, cap=1MB → AutoParseResult::Arena
+        let (mut client, server) = socket_pair().await;
+
+        let body = b"hello-world-payload!";
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        use tokio::io::AsyncWriteExt;
+        tokio::spawn(async move {
+            client.write_all(req.as_bytes()).await.unwrap();
+        });
+
+        let options = std::sync::Arc::new(crate::Options::new());
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let accept = crate::Accept::new(server, options, peer);
+
+        let result = accept
+            .parse_request_auto_with_cap(1 * 1024 * 1024) // 1 MiB cap
+            .await
+            .unwrap();
+
+        match result {
+            crate::AutoParseResult::Arena {
+                request,
+                response: _,
+            } => {
+                // arena body 가 정확한 body 를 가지고 있는지
+                let body_bytes = request.body().get_body_bytes();
+                assert_eq!(body_bytes, body);
+            }
+            crate::AutoParseResult::Streaming { .. } => {
+                panic!("expected Arena variant for CL within cap");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_default_cap_50mb_routes_small_request_to_arena() {
+        // parse_request_auto() — 인자 없는 default (50 MiB cap). 작은 요청은 Arena로.
+        let (mut client, server) = socket_pair().await;
+
+        let body = b"small-payload";
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        use tokio::io::AsyncWriteExt;
+        tokio::spawn(async move {
+            client.write_all(req.as_bytes()).await.unwrap();
+        });
+
+        let options = std::sync::Arc::new(crate::Options::new());
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let accept = crate::Accept::new(server, options, peer);
+
+        let result = accept.parse_request_auto().await.unwrap();
+        match result {
+            crate::AutoParseResult::Arena {
+                request,
+                response: _,
+            } => {
+                assert_eq!(request.body().get_body_bytes(), body);
+            }
+            crate::AutoParseResult::Streaming { .. } => {
+                panic!("expected Arena for 13B body under 50MiB default cap");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_branches_to_streaming_when_content_length_exceeds_cap() {
+        // 큰 요청: CL=200_000, cap=1KB → AutoParseResult::Streaming
+        let (mut client, server) = socket_pair().await;
+
+        let body = vec![b'Z'; 200_000];
+        let req_head = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        use tokio::io::AsyncWriteExt;
+        let body_clone = body.clone();
+        tokio::spawn(async move {
+            client.write_all(req_head.as_bytes()).await.unwrap();
+            for chunk in body_clone.chunks(8_000) {
+                client.write_all(chunk).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        });
+
+        let mut opt = crate::Options::new();
+        opt.read_timeout_milliseconds = 1000;
+        opt.read_max_retry = 10;
+        let options = std::sync::Arc::new(opt);
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let accept = crate::Accept::new(server, options, peer);
+
+        let result = accept
+            .parse_request_auto_with_cap(1024) // 1 KiB cap → 200KB body 는 streaming 으로
+            .await
+            .unwrap();
+
+        match result {
+            crate::AutoParseResult::Streaming {
+                mut request,
+                response: _,
+            } => {
+                // streaming body 청크 단위로 읽어 검증
+                let collected = request.body_mut().bytes(None).await.unwrap();
+                assert_eq!(collected.len(), body.len());
+                assert_eq!(collected, body);
+            }
+            crate::AutoParseResult::Arena { .. } => {
+                panic!("expected Streaming variant for CL exceeding cap");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_into_multipart_parses_chunked_boundary() {
+        // multer 가 청크 경계에 걸친 boundary 도 올바르게 파싱하는지 확인.
+        // 클라이언트가 1-바이트 단위로 흘려보내는 극단 시나리오로 boundary
+        // 인식이 read 청크 경계에 의존하지 않음을 증명.
+        let (mut client, server) = socket_pair().await;
+
+        let boundary = "BNDRY";
+        let mut body_raw = Vec::new();
+        body_raw.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body_raw
+            .extend_from_slice(b"Content-Disposition: form-data; name=\"field1\"\r\n\r\nhello\r\n");
+        body_raw.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body_raw.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"field2\"; filename=\"f.bin\"\r\n\r\n",
+        );
+        body_raw.extend_from_slice(&[1u8, 2, 3, 4, 5]);
+        body_raw.extend_from_slice(b"\r\n");
+        body_raw.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+        let req_head = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary={}\r\nContent-Length: {}\r\n\r\n",
+            boundary,
+            body_raw.len()
+        );
+
+        use tokio::io::AsyncWriteExt;
+        let body_clone = body_raw.clone();
+        tokio::spawn(async move {
+            client.write_all(req_head.as_bytes()).await.unwrap();
+            // 1바이트씩 흘려 보냄 — boundary 가 청크 경계에 무조건 걸치게.
+            for b in body_clone.iter() {
+                client.write_all(&[*b]).await.unwrap();
+            }
+        });
+
+        let mut options = Options::new();
+        options.read_timeout_milliseconds = 2000;
+        options.read_max_retry = 20;
+
+        let hr = read_headers_only(server, &options).await.unwrap();
+        let (read_half, _write_half) = hr.stream.into_split();
+        let body_streaming =
+            crate::Body::new_streaming(hr.leftover, read_half, hr.content_length, None, None);
+
+        let mut mp = body_streaming.into_multipart(boundary.to_string());
+        let mut got_field1 = None;
+        let mut got_field2_bytes = None;
+
+        while let Some(mut field) = mp.next_field().await.unwrap() {
+            let name = field.name().map(|s| s.to_string());
+            let mut bytes = Vec::new();
+            while let Some(chunk) = field.chunk().await.unwrap() {
+                bytes.extend_from_slice(&chunk);
+            }
+            match name.as_deref() {
+                Some("field1") => got_field1 = Some(String::from_utf8(bytes).unwrap()),
+                Some("field2") => got_field2_bytes = Some(bytes),
+                _ => {}
+            }
+        }
+
+        assert_eq!(got_field1.as_deref(), Some("hello"));
+        assert_eq!(got_field2_bytes.as_deref(), Some(&[1u8, 2, 3, 4, 5][..]));
+    }
+
+    #[tokio::test]
+    async fn header_read_deadline_triggers_when_client_stalls() {
+        // 핵심 회귀 방지: 클라이언트가 헤더를 부분만 보내고 멈추면
+        // header_read_deadline_ms 내에 거부되어야 한다 (slowloris 방어).
+        let (mut client, server) = socket_pair().await;
+
+        // 일부러 \r\n\r\n 를 보내지 않음 — 서버는 영원히 헤더 끝을 못 찾는다.
+        use tokio::io::AsyncWriteExt;
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: stalled")
+            .await
+            .unwrap();
+        // client는 drop하지 않고 유지 (drop하면 EOF로 종료되어 deadline 이전에 break됨)
+
+        let mut options = Options::new();
+        options.header_read_deadline_ms = Some(150); // 150ms 안에 deadline
+        options.read_timeout_milliseconds = 50;
+        options.read_max_retry = 10; // retry는 deadline보다 오래 가도록 충분히 크게
+
+        let start = std::time::Instant::now();
+        let result = get_bytes_from_reader(server, &options).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "expected slowloris rejection");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Header read deadline") || err.contains("slowloris"),
+            "error msg should mention deadline/slowloris, got: {}",
+            err
+        );
+        // deadline 150ms 인데 elapsed 가 1초 이상이면 실패 (deadline이 사실상 안 먹은 것)
+        assert!(
+            elapsed.as_millis() < 1000,
+            "deadline should fire fast (<1s), took {:?}",
+            elapsed
+        );
+
+        // client는 여기서 drop — 명시적으로 살아있어야 했으므로 유지 흔적 남김
+        drop(client);
     }
 
     #[tokio::test]

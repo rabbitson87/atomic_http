@@ -484,3 +484,73 @@ impl ConnectionPool {
             .clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn config_presets_are_sensible() {
+        let high = ConnectionPoolConfig::high_performance();
+        assert!(high.max_connections_per_host >= 64);
+        assert!(high.max_idle_time >= Duration::from_secs(60));
+        assert!(high.enable_keep_alive);
+
+        let conservative = ConnectionPoolConfig::conservative();
+        assert!(conservative.max_connections_per_host <= 32);
+        assert!(conservative.max_idle_time <= Duration::from_secs(60));
+
+        let disabled = ConnectionPoolConfig::disabled();
+        assert!(!disabled.enable_keep_alive);
+    }
+
+    #[test]
+    fn config_builder_chains() {
+        let c = ConnectionPoolConfig::new()
+            .max_connections_per_host(64)
+            .idle_timeout(120)
+            .max_lifetime(900)
+            .keep_alive(true);
+        assert_eq!(c.max_connections_per_host, 64);
+        assert_eq!(c.max_idle_time, Duration::from_secs(120));
+        assert_eq!(c.max_lifetime, Duration::from_secs(900));
+        assert!(c.enable_keep_alive);
+    }
+
+    #[tokio::test]
+    async fn pool_lifecycle_no_deadlock() {
+        // start_cleanup_task / shutdown 가 &self 로 동작 — Mutex 제거 후
+        // 동시 호출에서도 데드락 없이 끝나야 한다.
+        let pool = Arc::new(ConnectionPool::new(ConnectionPoolConfig::new()));
+        pool.start_cleanup_task();
+        // 약간 대기해서 cleanup task가 한 번 tick 하도록
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pool.shutdown().await;
+        // 두 번 호출해도 안전 (이미 take 되어 있음)
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_stats_does_not_deadlock() {
+        // stats() 가 외부 Mutex 없이 동시 호출돼도 데드락 없음을 검증.
+        let pool = Arc::new(ConnectionPool::new(ConnectionPoolConfig::new()));
+        pool.start_cleanup_task();
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let p = Arc::clone(&pool);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..50 {
+                    let s = p.stats();
+                    // 의미 있는 필드 접근으로 옵티마이저가 못 지우게
+                    let _ = s.total_connections + s.active_connections;
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        pool.shutdown().await;
+    }
+}

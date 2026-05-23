@@ -1,2 +1,6 @@
 /target
 /test/app
+
+# 벤치/예제 실행 시 생성되는 임시 테스트 데이터
+/test_files
+/test_json_files

@@ -18,8 +18,6 @@ use crate::ArenaBody;
 use crate::Body;
 use crate::SendableError;
 
-use super::StringUtil;
-
 #[async_trait]
 pub trait RequestUtils {
     fn get_json<'a, T>(&'a mut self) -> Result<T, SendableError>
@@ -35,23 +33,23 @@ impl RequestUtils for Request<Body> {
     where
         T: Deserialize<'a>,
     {
-        if self.body().len > 0 {
-            self.body_mut().body = String::from_utf8_lossy(self.body().bytes.as_slice()).into();
+        // buffered_bytes(): parse_request로 들어온 요청은 body가 leftover에 모두 들어있음.
+        // streaming 모드 (parse_request_streaming) 를 쓴 경우 핸들러가 먼저 body.bytes(cap).await? 호출 필요.
+        let bytes = self.body().buffered_bytes();
+        if bytes.is_empty() {
+            return Err("Empty body".into());
         }
-
-        let body: T = match self.body().body.as_str() {
-            "" => return Err("Empty body".into()),
-            body => serde_json::from_str(body)?,
-        };
-        Ok(body)
+        let parsed: T = serde_json::from_slice(bytes)?;
+        Ok(parsed)
     }
 
     fn get_text(&mut self) -> Result<String, SendableError> {
-        if self.body().len > 0 {
-            self.body_mut().body = String::from_utf8_lossy(self.body().bytes.as_slice()).into();
+        // UTF-8 엄격 검증 — 잘못된 시퀀스면 에러.
+        let bytes = self.body().buffered_bytes();
+        if bytes.is_empty() {
+            return Ok(String::new());
         }
-
-        Ok(self.body().body.copy_string())
+        Ok(std::str::from_utf8(bytes)?.to_string())
     }
 
     async fn get_multi_part(&mut self) -> Result<Option<Form>, SendableError> {
@@ -73,7 +71,7 @@ impl RequestUtils for Request<Body> {
         let boundary_bytes = boundary_marker.as_bytes();
         let mut form = Form::new();
 
-        for part_data in self.body().bytes.as_slice().split_bytes(boundary_bytes) {
+        for part_data in self.body().buffered_bytes().split_bytes(boundary_bytes) {
             dev_print!("part_data: {:?}", part_data.len());
 
             // 헤더/바디 경계 (\r\n\r\n) 찾기
@@ -142,8 +140,8 @@ impl RequestUtils for Request<Body> {
                 part.body = body_trimmed.to_vec();
                 form.parts.push(part);
             } else if let Some(name) = text_field_name {
-                // 단일 텍스트 필드: 마지막으로 본 것만 form.text에 보관 (기존 동작 유지)
-                form.text = (name, String::from_utf8_lossy(body_trimmed).into_owned());
+                form.text_fields
+                    .push((name, String::from_utf8_lossy(body_trimmed).into_owned()));
             }
         }
 
@@ -293,4 +291,150 @@ fn extract_content_disposition_value<'a>(header_value: &'a str, key: &str) -> Op
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::Request;
+
+    fn make_multipart_body(boundary: &str, parts: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
+        // parts: (name, filename, body_bytes)
+        let mut buf = Vec::new();
+        for (name, filename, body) in parts {
+            buf.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            match filename {
+                Some(f) => buf.extend_from_slice(
+                    format!(
+                        "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                        name, f
+                    )
+                    .as_bytes(),
+                ),
+                None => buf.extend_from_slice(
+                    format!("Content-Disposition: form-data; name=\"{}\"\r\n", name).as_bytes(),
+                ),
+            }
+            buf.extend_from_slice(b"\r\n");
+            buf.extend_from_slice(body);
+            buf.extend_from_slice(b"\r\n");
+        }
+        buf.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+        buf
+    }
+
+    fn build_req(body: Vec<u8>, boundary: &str) -> Request<Body> {
+        Request::builder()
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={}", boundary),
+            )
+            .body(Body::from_bytes(body, None))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn multipart_collects_all_text_fields() {
+        // 회귀 방지: 이전 Form.text 단일 튜플은 마지막 필드만 남는 버그가 있었음.
+        let boundary = "BNDRY";
+        let body = make_multipart_body(
+            boundary,
+            &[
+                ("name", None, b"alice"),
+                ("age", None, b"30"),
+                ("city", None, b"seoul"),
+            ],
+        );
+        let mut req = build_req(body, boundary);
+        let form = req.get_multi_part().await.unwrap().expect("form expected");
+        assert_eq!(form.text_fields.len(), 3);
+        assert_eq!(form.find_text_field("name"), Some("alice"));
+        assert_eq!(form.find_text_field("age"), Some("30"));
+        assert_eq!(form.find_text_field("city"), Some("seoul"));
+        assert_eq!(form.parts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn multipart_separates_file_and_text_parts() {
+        let boundary = "BNDRY";
+        let body = make_multipart_body(
+            boundary,
+            &[
+                ("description", None, b"a small file"),
+                ("upload", Some("hello.bin"), b"\x00\x01\x02\x03"),
+            ],
+        );
+        let mut req = build_req(body, boundary);
+        let form = req.get_multi_part().await.unwrap().unwrap();
+        assert_eq!(form.text_fields.len(), 1);
+        assert_eq!(form.find_text_field("description"), Some("a small file"));
+        assert_eq!(form.parts.len(), 1);
+        let p = &form.parts[0];
+        assert_eq!(p.name, "upload");
+        assert_eq!(p.file_name, "hello.bin");
+        assert_eq!(p.body, vec![0x00, 0x01, 0x02, 0x03]);
+    }
+
+    #[tokio::test]
+    async fn multipart_returns_none_for_non_multipart() {
+        let mut req: Request<Body> = Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::from_bytes(b"{}".to_vec(), None))
+            .unwrap();
+        let r = req.get_multi_part().await.unwrap();
+        assert!(r.is_none());
+    }
+
+    fn body_req(bytes: Vec<u8>) -> Request<Body> {
+        Request::builder()
+            .body(Body::from_bytes(bytes, None))
+            .unwrap()
+    }
+
+    #[test]
+    fn get_text_returns_string_for_valid_utf8() {
+        // 정상 UTF-8 → from_utf8 통과, 새 String 반환.
+        let mut req = body_req("안녕 hello".as_bytes().to_vec());
+        let s = req.get_text().unwrap();
+        assert_eq!(s, "안녕 hello");
+    }
+
+    #[test]
+    fn get_text_returns_empty_for_empty_body() {
+        // 0바이트 body는 빈 문자열 (에러 아님).
+        let mut req = body_req(Vec::new());
+        let s = req.get_text().unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn get_text_rejects_invalid_utf8() {
+        // 핵심 회귀 방지: 0.14.0에서 from_utf8_lossy 제거 → invalid 시 Err.
+        // (이전 lossy 동작은 0xFF/0xFE를 U+FFFD로 silent 치환했음.)
+        let mut req = body_req(vec![0xFF, 0xFE, 0xFD]);
+        assert!(req.get_text().is_err());
+    }
+
+    #[test]
+    fn get_json_parses_valid_payload() {
+        // from_slice 직접 호출: UTF-8 검증 + JSON 파싱 동시.
+        let mut req = body_req(br#"{"k":1,"v":"hi"}"#.to_vec());
+        let v: serde_json::Value = req.get_json().unwrap();
+        assert_eq!(v["k"], 1);
+        assert_eq!(v["v"], "hi");
+    }
+
+    #[test]
+    fn get_json_rejects_empty_body() {
+        // 빈 body는 명시적 에러 (이전엔 serde_json의 EOF 에러로 떨어졌음).
+        let mut req = body_req(Vec::new());
+        assert!(req.get_json::<serde_json::Value>().is_err());
+    }
+
+    #[test]
+    fn get_json_rejects_invalid_utf8() {
+        // serde_json::from_slice는 비-UTF8을 거부. 회귀 방지.
+        let mut req = body_req(vec![0xFF, 0xFE, 0xFD]);
+        assert!(req.get_json::<serde_json::Value>().is_err());
+    }
 }

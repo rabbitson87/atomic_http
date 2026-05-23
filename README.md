@@ -14,8 +14,11 @@
 
 ```toml
 [dependencies]
-atomic_http = { version = "0.6.0", features = ["arena"] }
+atomic_http = { version = "0.14.0", features = ["arena"] }
 ```
+
+> ℹ️ 프로덕션 배포 전 [SECURITY.md](SECURITY.md) 의 권장 설정
+> (`max_body_size`, `header_read_deadline_ms`, TLS) 을 적용하세요.
 
 ## 🛠️ 기능별 Features
 
@@ -207,11 +210,14 @@ match request.get_multi_part_arena()? {
 
 ```bash
 export NO_DELAY=true
-export READ_TIMEOUT_MILISECONDS=5000
+export READ_TIMEOUT_MILLISECONDS=5000
 export READ_BUFFER_SIZE=8192
 export ROOT_PATH="/var/www"
 export ZERO_COPY_THRESHOLD=1048576
 export ENABLE_FILE_CACHE=true
+# 0.14+ 보안 옵션 (DoS / slowloris 방어)
+export MAX_BODY_SIZE=10485760           # 본문 cap (bytes); 미설정 시 무제한
+export HEADER_READ_DEADLINE_MS=5000     # 헤더 전체 수신 deadline
 ```
 
 ## 🏗️ 개발 및 기여

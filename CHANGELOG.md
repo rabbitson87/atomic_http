@@ -1,5 +1,16 @@
 # Changes
 
+## 0.14.0
+
+* Add streaming body API (`parse_request_streaming`, `body.read_chunk`, `body.bytes(cap)`, `body.into_stream`, `body.into_multipart`) on top of `multer`.
+* Add `parse_request_auto()` (default 50 MiB cap) and `parse_request_auto_with_cap(cap)` returning `AutoParseResult::{Arena,Streaming}` — picks arena (zero-copy) for small requests, streaming for large ones based on `Content-Length`.
+* `Body.bytes: Vec<u8>` field removed; replace with `body.buffered_bytes()` or `body.bytes(cap).await?` (breaking).
+* `Writer.stream` / `ArenaWriter.stream` types: `TcpStream` → `OwnedWriteHalf` (breaking; `SendBytes` impl added so response writes are unaffected).
+* Add `Options.max_body_size` and `Options.header_read_deadline_ms` (slowloris defense), body reader no longer pre-allocates `Content-Length` bytes.
+* `response_file` rejects path traversal via `safe_path_join`; `get_text`/`get_json` enforce strict UTF-8; `Form.text_fields` collects all text parts (was a single-tuple bug).
+* New `SECURITY.md`, GitHub Actions CI (test/MSRV 1.77/fmt/clippy).
+* 40 lib tests including streaming chunk reassembly and chunked multipart boundary parsing.
+
 ## 0.13.0
 
 * Move `current_client_addr` from `Options` to `Accept.peer`; `Server.options` is now a shared `Arc<Options>` (use `server.options_mut()` for in-place edits).

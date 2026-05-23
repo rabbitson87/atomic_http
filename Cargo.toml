@@ -1,6 +1,6 @@
 [package]
 name = "atomic_http"
-version = "0.13.0"
+version = "0.14.0"
 authors = ["hsng95@gmail.com"]
 description = "High level HTTP server library"
 homepage = "https://github.com/rabbitson87/atomic_http"
@@ -32,6 +32,11 @@ serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 memmap2 = { version = "0.9.10" }
 mime_guess = { version = "2.0.5" }
+bytes = "1.10"
+multer = "3.1"
+futures-util = { version = "0.3.32", default-features = false, features = [
+    "alloc",
+] }
 
 tokio-rustls = { version = "0.26.4", default-features = false, optional = true }
 dotenvy = { version = "0.15.7", optional = true }
@@ -73,37 +78,13 @@ name = "zero_copy_test"
 name = "integrated_test"
 
 [[example]]
-name = "comparative_benchmark"
-
-[[example]]
 name = "integrated_multipart_test"
 
 [[example]]
 name = "simple_server_test"
 
 [[example]]
-name = "simple_performance_test"
-
-[[example]]
-name = "simple_benchmark_test"
-
-[[example]]
 name = "debug_test"
-
-[[example]]
-name = "simd_benchmark"
-
-[[example]]
-name = "simd_comparison"
-
-[[example]]
-name = "vectored_io_benchmark"
-
-[[example]]
-name = "simple_vectored_test"
-
-[[example]]
-name = "connection_pool_benchmark"
 
 [[example]]
 name = "simple_connection_test"

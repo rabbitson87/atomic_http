@@ -110,21 +110,24 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "atomic_http"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "bumpalo",
+ "bytes",
  "chrono",
  "clap",
  "criterion",
  "dashmap",
  "dotenvy",
  "futures",
+ "futures-util",
  "http",
  "httparse",
  "matchit",
  "memmap2",
  "mime_guess",
+ "multer",
  "percent-encoding",
  "rand 0.10.1",
  "reqwest",
@@ -1184,6 +1187,23 @@ dependencies = [
  "libc",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.61.1",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
 ]
 
 [[package]]

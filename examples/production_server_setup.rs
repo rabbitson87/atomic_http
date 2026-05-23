@@ -43,7 +43,7 @@ fn setup_production_options() -> Options {
 
     // Basic server configuration
     options.no_delay = true;
-    options.read_timeout_miliseconds = 5000; // 5 second timeout
+    options.read_timeout_milliseconds = 5000; // 5 second timeout
     options.read_buffer_size = 8192; // 8KB buffer
     options.zero_copy_threshold = 512 * 1024; // 512KB threshold
     options.enable_file_cache = true;
@@ -141,7 +141,7 @@ mod tests {
 
         // Test basic options
         assert_eq!(options.no_delay, true);
-        assert_eq!(options.read_timeout_miliseconds, 5000);
+        assert_eq!(options.read_timeout_milliseconds, 5000);
         assert_eq!(options.read_buffer_size, 8192);
         assert_eq!(options.zero_copy_threshold, 512 * 1024);
 
