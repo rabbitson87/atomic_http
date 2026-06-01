@@ -1,5 +1,9 @@
 # Changes
 
+## 0.14.1
+
+* Add `stream_parse_auto()` / `stream_parse_auto_with_cap(cap)` returning `StreamResultAuto::{WebSocket, HttpArena, HttpStreaming}` — single 3-way branch for WebSocket upgrade + HTTP size-based dispatch (websocket feature).
+
 ## 0.14.0
 
 * Add streaming body API (`parse_request_streaming`, `body.read_chunk`, `body.bytes(cap)`, `body.into_stream`, `body.into_multipart`) on top of `multer`.

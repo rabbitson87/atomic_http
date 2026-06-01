@@ -14,7 +14,7 @@
 
 ```toml
 [dependencies]
-atomic_http = { version = "0.14.0", features = ["arena"] }
+atomic_http = { version = "0.14.1", features = ["arena"] }
 ```
 
 > ℹ️ 프로덕션 배포 전 [SECURITY.md](SECURITY.md) 의 권장 설정

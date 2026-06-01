@@ -1504,6 +1504,113 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "websocket")]
+    #[tokio::test]
+    async fn stream_parse_auto_routes_small_http_to_arena() {
+        // 작은 HTTP 요청 (CL=20, default cap=50MiB) → HttpArena 분기
+        let (mut client, server) = socket_pair().await;
+        let body = b"hello-world-payload!";
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        use tokio::io::AsyncWriteExt;
+        tokio::spawn(async move {
+            client.write_all(req.as_bytes()).await.unwrap();
+        });
+
+        let options = std::sync::Arc::new(crate::Options::new());
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let accept = crate::Accept::new(server, options, peer);
+
+        match accept.stream_parse_auto().await.unwrap() {
+            crate::StreamResultAuto::HttpArena(request, _) => {
+                assert_eq!(request.body().get_body_bytes(), body);
+            }
+            crate::StreamResultAuto::HttpStreaming(_, _) => {
+                panic!("expected HttpArena for small HTTP body")
+            }
+            crate::StreamResultAuto::WebSocket(_, _, _) => {
+                panic!("expected HttpArena, not WebSocket")
+            }
+        }
+    }
+
+    #[cfg(feature = "websocket")]
+    #[tokio::test]
+    async fn stream_parse_auto_routes_large_http_to_streaming() {
+        // 큰 HTTP 요청 (CL=200KB, cap=1KB) → HttpStreaming 분기
+        let (mut client, server) = socket_pair().await;
+        let body = vec![b'Z'; 200_000];
+        let req_head = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        use tokio::io::AsyncWriteExt;
+        let body_clone = body.clone();
+        tokio::spawn(async move {
+            client.write_all(req_head.as_bytes()).await.unwrap();
+            for chunk in body_clone.chunks(8_000) {
+                client.write_all(chunk).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        });
+
+        let mut opt = crate::Options::new();
+        opt.read_timeout_milliseconds = 1000;
+        opt.read_max_retry = 10;
+        let options = std::sync::Arc::new(opt);
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let accept = crate::Accept::new(server, options, peer);
+
+        match accept.stream_parse_auto_with_cap(1024).await.unwrap() {
+            crate::StreamResultAuto::HttpStreaming(mut request, _) => {
+                let collected = request.body_mut().bytes(None).await.unwrap();
+                assert_eq!(collected, body);
+            }
+            crate::StreamResultAuto::HttpArena(_, _) => {
+                panic!("expected HttpStreaming for CL > cap")
+            }
+            crate::StreamResultAuto::WebSocket(_, _, _) => {
+                panic!("expected HttpStreaming, not WebSocket")
+            }
+        }
+    }
+
+    #[cfg(feature = "websocket")]
+    #[tokio::test]
+    async fn stream_parse_auto_recognizes_websocket_upgrade() {
+        // WebSocket upgrade 헤더 → WebSocket 분기 (HTTP 분기 X)
+        let (mut client, server) = socket_pair().await;
+        let req = "GET /ws HTTP/1.1\r\n\
+            Host: x\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            Sec-WebSocket-Version: 13\r\n\r\n";
+        use tokio::io::AsyncWriteExt;
+        tokio::spawn(async move {
+            client.write_all(req.as_bytes()).await.unwrap();
+            // 클라이언트 stream을 살려둬야 서버측 perform_upgrade가 응답 쓸 수 있음
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let options = std::sync::Arc::new(crate::Options::new());
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let accept = crate::Accept::new(server, options, peer);
+
+        match accept.stream_parse_auto().await.unwrap() {
+            crate::StreamResultAuto::WebSocket(_ws, req, _peer) => {
+                assert_eq!(req.uri().path(), "/ws");
+            }
+            crate::StreamResultAuto::HttpArena(_, _)
+            | crate::StreamResultAuto::HttpStreaming(_, _) => {
+                panic!("expected WebSocket variant for Upgrade headers")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn streaming_into_multipart_parses_chunked_boundary() {
         // multer 가 청크 경계에 걸친 boundary 도 올바르게 파싱하는지 확인.

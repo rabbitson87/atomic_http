@@ -45,6 +45,9 @@ pub use websocket::StreamResult;
 #[cfg(all(feature = "websocket", feature = "arena"))]
 pub use websocket::StreamResultArena;
 
+#[cfg(feature = "websocket")]
+pub use websocket::StreamResultAuto;
+
 pub mod external {
     pub use async_trait;
     #[cfg(feature = "env")]
@@ -564,6 +567,23 @@ impl Accept {
     pub async fn stream_parse(self) -> Result<StreamResult, SendableError> {
         self.tcp_stream.set_nodelay(self.option.no_delay)?;
         websocket::try_upgrade(self.tcp_stream, self.option, self.peer).await
+    }
+
+    /// 0.14.0 신규 — WebSocket 분기 + HTTP auto (arena/streaming) 분기를 한 번에.
+    /// `DEFAULT_AUTO_ARENA_CAP` (50 MiB) 사용. 커스텀 cap은 `stream_parse_auto_with_cap`.
+    #[cfg(feature = "websocket")]
+    pub async fn stream_parse_auto(self) -> Result<StreamResultAuto, SendableError> {
+        self.stream_parse_auto_with_cap(DEFAULT_AUTO_ARENA_CAP).await
+    }
+
+    /// `stream_parse_auto` 의 명시적 cap 버전.
+    #[cfg(feature = "websocket")]
+    pub async fn stream_parse_auto_with_cap(
+        self,
+        arena_cap: usize,
+    ) -> Result<StreamResultAuto, SendableError> {
+        self.tcp_stream.set_nodelay(self.option.no_delay)?;
+        websocket::try_upgrade_auto(self.tcp_stream, self.option, self.peer, arena_cap).await
     }
 
     #[cfg(all(feature = "websocket", feature = "arena"))]

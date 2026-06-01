@@ -9,12 +9,14 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::helpers::traits::http_stream::{
     find_header_end_optimized, get_bytes_from_reader, get_parse_result_from_request, get_request,
+    read_headers_only, HeaderReadResult,
 };
 use crate::{Body, Options, SendableError, Writer};
 
 #[cfg(feature = "arena")]
 use crate::helpers::traits::http_stream::{
     get_bytes_arena_direct, get_parse_result_arena_writer, parse_http_request_arena,
+    read_remaining_body,
 };
 #[cfg(feature = "arena")]
 use crate::{ArenaBody, ArenaWriter};
@@ -38,6 +40,20 @@ pub enum StreamResultArena {
     /// The `Request<()>` contains the original upgrade request metadata
     /// (URI, method, headers) for routing and authentication.
     WebSocket(WebSocketStream<TcpStream>, Request<()>, SocketAddr),
+}
+
+/// Result of a `stream_parse_auto` — 3-way branch:
+/// 1) WebSocket upgrade, 2) HTTP body small enough for arena (zero-copy), 3) HTTP body large/unknown → streaming.
+///
+/// arena feature 비활성화 시 `HttpArena` variant 는 컴파일 안 됨.
+pub enum StreamResultAuto {
+    /// WebSocket upgrade completed.
+    WebSocket(WebSocketStream<TcpStream>, Request<()>, SocketAddr),
+    /// HTTP, Content-Length ≤ arena_cap — arena zero-copy parsing.
+    #[cfg(feature = "arena")]
+    HttpArena(Request<ArenaBody>, Response<ArenaWriter>),
+    /// HTTP, Content-Length > arena_cap or missing — streaming body.
+    HttpStreaming(Request<Body>, Response<Writer>),
 }
 
 /// Parse the HTTP request line and headers from raw bytes via `httparse`.
@@ -174,6 +190,74 @@ pub(crate) async fn try_upgrade(
         let (req, res) = get_parse_result_from_request(request, stream, options, peer)?;
         Ok(StreamResult::Http(req, res))
     }
+}
+
+/// `stream_parse_auto` 의 내부 구현 — 헤더만 먼저 읽어 WebSocket 판정 후
+/// HTTP인 경우 Content-Length 보고 arena/streaming 으로 분기한다.
+pub(crate) async fn try_upgrade_auto(
+    stream: TcpStream,
+    options: Arc<Options>,
+    peer: SocketAddr,
+    arena_cap: usize,
+) -> Result<StreamResultAuto, SendableError> {
+    // 1) 헤더만 읽기 (WebSocket이든 HTTP든 헤더는 동일하게 필요)
+    let HeaderReadResult {
+        header_bytes,
+        leftover,
+        content_length,
+        stream,
+    } = read_headers_only(stream, &options).await?;
+
+    // 2) WebSocket upgrade 판정 — 헤더의 Upgrade/Connection 헤더만 보고 결정
+    if let Some((client_key, request)) = parse_upgrade_request(&header_bytes) {
+        // WebSocket 핸드셰이크. leftover/body 는 무시 (WS 클라이언트는 upgrade 전 body 안 보냄).
+        let ws_stream = perform_upgrade(stream, &client_key).await?;
+        return Ok(StreamResultAuto::WebSocket(ws_stream, request, peer));
+    }
+
+    // 3) HTTP arena 경로 (CL ≤ arena_cap, arena feature 활성)
+    #[cfg(feature = "arena")]
+    if let Some(cl) = content_length {
+        if cl <= arena_cap {
+            let (full_body, stream2) =
+                read_remaining_body(leftover, stream, content_length, &options).await?;
+            let header_end = header_bytes.len();
+            let mut full = Vec::with_capacity(header_end + full_body.len());
+            full.extend_from_slice(&header_bytes);
+            full.extend_from_slice(&full_body);
+            let arena_body = ArenaBody::new(&full, header_end, header_end);
+            let request = parse_http_request_arena(arena_body)?;
+            let (req, res) = get_parse_result_arena_writer(request, stream2, options, peer)?;
+            return Ok(StreamResultAuto::HttpArena(req, res));
+        }
+    }
+    let _ = arena_cap; // arena feature 없을 때 unused 방지
+
+    // 4) HTTP streaming 경로 (CL > arena_cap or 미상)
+    let request_buffered = get_request(header_bytes).await?;
+    let (parts, _empty_body) = request_buffered.into_parts();
+    let (read_half, write_half) = stream.into_split();
+    let body = Body::new_streaming(
+        leftover,
+        read_half,
+        content_length,
+        Some(peer),
+        options.max_body_size,
+    );
+    let request = Request::from_parts(parts, body);
+    let version = request.version();
+    let response = Response::builder()
+        .version(version)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .status(400)
+        .body(Writer {
+            stream: write_half,
+            body: String::new(),
+            bytes: vec![],
+            use_file: false,
+            options,
+        })?;
+    Ok(StreamResultAuto::HttpStreaming(request, response))
 }
 
 /// Attempt a WebSocket upgrade on the given stream (arena variant).
