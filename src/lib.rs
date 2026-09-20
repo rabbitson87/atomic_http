@@ -10,6 +10,7 @@ use bumpalo::Bump;
 use serde::{Deserialize, Serialize};
 
 pub mod helpers;
+pub mod sse;
 
 #[cfg(feature = "connection_pool")]
 pub mod connection_pool;
@@ -27,6 +28,7 @@ pub use helpers::traits::http_response::ResponseUtil;
 #[cfg(feature = "arena")]
 pub use helpers::traits::http_response::ResponseUtilArena;
 pub use helpers::traits::http_stream::StreamHttp;
+pub use sse::{is_disconnect, ResponseSse, SseError, SseEvent, SseWriter};
 
 #[cfg(feature = "arena")]
 pub use helpers::traits::http_stream::{StreamHttpArena, StreamHttpArenaWriter};
@@ -573,7 +575,8 @@ impl Accept {
     /// `DEFAULT_AUTO_ARENA_CAP` (50 MiB) 사용. 커스텀 cap은 `stream_parse_auto_with_cap`.
     #[cfg(feature = "websocket")]
     pub async fn stream_parse_auto(self) -> Result<StreamResultAuto, SendableError> {
-        self.stream_parse_auto_with_cap(DEFAULT_AUTO_ARENA_CAP).await
+        self.stream_parse_auto_with_cap(DEFAULT_AUTO_ARENA_CAP)
+            .await
     }
 
     /// `stream_parse_auto` 의 명시적 cap 버전.

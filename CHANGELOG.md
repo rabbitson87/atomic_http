@@ -1,5 +1,10 @@
 # Changes
 
+## 0.15.0
+
+* Add `sse` module for Server-Sent Events: `ResponseSse::into_sse()` (for `Response<Writer>` and `Response<ArenaWriter>`) returns an `SseWriter` that sends the `text/event-stream` head once and then frames via `send`, `send_event`, `send_data`, `send_comment`. `SseEvent` builds frames with `event` / `id` / `retry` and multi-line data; line breaks in `event` / `id` are rejected. `keepalive_while(interval, fut)` sends comment frames while a slow future runs, `finish()` ends the stream, and `is_disconnect(err)` recognises a departed client.
+* Add `examples/sse_test.rs`.
+
 ## 0.14.1
 
 * Add `stream_parse_auto()` / `stream_parse_auto_with_cap(cap)` returning `StreamResultAuto::{WebSocket, HttpArena, HttpStreaming}` — single 3-way branch for WebSocket upgrade + HTTP size-based dispatch (websocket feature).

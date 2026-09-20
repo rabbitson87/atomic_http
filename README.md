@@ -8,6 +8,7 @@
 - **Zero-copy 기술**: 메모리 복사 없는 파일 서빙
 - **멀티파트 지원**: 고성능 파일 업로드 처리
 - **비동기 처리**: Tokio 기반 비동기 I/O
+- **SSE 스트리밍**: `into_sse()`로 Server-Sent Events 전송
 - **타입 안전성**: Rust의 타입 시스템 활용
 
 ## 📦 설치
@@ -203,6 +204,36 @@ match request.get_multi_part_arena()? {
     }
 }
 ```
+
+### Server-Sent Events (SSE)
+
+응답은 보통 `content-length`와 함께 한 번에 전송되지만, `into_sse()`는 소켓의 write half를 넘겨받아 헤더를 한 번 보내고 이후 프레임을 원하는 만큼 전송합니다. (`Response<Writer>`, `Response<ArenaWriter>` 모두 지원)
+
+```rust
+use atomic_http::*;
+use std::time::Duration;
+
+async fn stream(response: http::Response<ArenaWriter>) -> Result<(), SendableError> {
+    // 추가 헤더(Set-Cookie, CORS 등)는 into_sse() 전에 response.headers_mut()로 설정
+    let mut sse = response.into_sse().await?;
+
+    sse.send_event("token", "안녕").await?;                       // event: token
+    sse.send(&SseEvent::data("여러 줄\n데이터").id("42")).await?;  // 줄바꿈은 data: 줄로 분리
+
+    // 느린 작업 동안 15초마다 주석 프레임을 보내 연결 유지
+    let answer = sse
+        .keepalive_while(Duration::from_secs(15), slow_work())
+        .await?;
+    sse.send_event("done", &answer).await?;
+
+    sse.finish().await // FIN 전송
+}
+```
+
+- 상태 코드는 항상 `200 OK`이고, 스트림은 `connection: close`로 소켓이 닫히면 끝납니다 (chunked 미사용).
+- 오류 응답은 `responser` / `responser_arena`로 보내세요.
+- 전송 실패가 클라이언트 이탈인지 `is_disconnect(&err)`로 확인할 수 있습니다.
+- 예제: `cargo run --example sse_test` 후 `curl -N http://127.0.0.1:8080/events`
 
 ## 🔧 환경 설정
 
